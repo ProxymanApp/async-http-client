@@ -201,8 +201,8 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
                 }
             }
 
-        case .sendBodyPart(let part):
-            context.writeAndFlush(self.wrapOutboundOut(.body(part)), promise: nil)
+        case .sendBodyPart(let part, let promise):
+            context.writeAndFlush(self.wrapOutboundOut(.body(part)), promise: promise)
 
         case .sendRequestEnd:
             context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
@@ -330,7 +330,7 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
 
     // MARK: Private HTTPRequestExecutor
 
-    private func writeRequestBodyPart0(_ data: IOData, request: HTTPExecutableRequest) {
+    private func writeRequestBodyPart0(_ data: IOData, request: HTTPExecutableRequest, promise: EventLoopPromise<Void>?) {
         guard self.request === request, let context = self.channelContext else {
             // Because the HTTPExecutableRequest may run in a different thread to our eventLoop,
             // calls from the HTTPExecutableRequest to our ChannelHandler may arrive here after
@@ -340,7 +340,7 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
             return
         }
 
-        let action = self.state.requestStreamPartReceived(data)
+        let action = self.state.requestStreamPartReceived(data, promise: promise)
         self.run(action, context: context)
     }
 
@@ -380,12 +380,12 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
 }
 
 extension HTTP1ClientChannelHandler: HTTPRequestExecutor {
-    func writeRequestBodyPart(_ data: IOData, request: HTTPExecutableRequest) {
+    func writeRequestBodyPart(_ data: IOData, request: HTTPExecutableRequest, promise: EventLoopPromise<Void>?) {
         if self.eventLoop.inEventLoop {
-            self.writeRequestBodyPart0(data, request: request)
+            self.writeRequestBodyPart0(data, request: request, promise: promise)
         } else {
             self.eventLoop.execute {
-                self.writeRequestBodyPart0(data, request: request)
+                self.writeRequestBodyPart0(data, request: request, promise: promise)
             }
         }
     }

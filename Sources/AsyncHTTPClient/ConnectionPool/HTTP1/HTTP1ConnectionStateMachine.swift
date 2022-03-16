@@ -41,7 +41,7 @@ struct HTTP1ConnectionStateMachine {
         }
 
         case sendRequestHead(HTTPRequestHead, startBody: Bool)
-        case sendBodyPart(IOData)
+        case sendBodyPart(IOData, EventLoopPromise<Void>?)
         case sendRequestEnd
 
         case pauseRequestBodyStream
@@ -189,13 +189,13 @@ struct HTTP1ConnectionStateMachine {
         }
     }
 
-    mutating func requestStreamPartReceived(_ part: IOData) -> Action {
+    mutating func requestStreamPartReceived(_ part: IOData, promise: EventLoopPromise<Void>?) -> Action {
         guard case .inRequest(var requestStateMachine, let close) = self.state else {
             preconditionFailure("Invalid state: \(self.state)")
         }
 
         return self.avoidingStateMachineCoW { state -> Action in
-            let action = requestStateMachine.requestStreamPartReceived(part)
+            let action = requestStateMachine.requestStreamPartReceived(part, promise: promise)
             state = .inRequest(requestStateMachine, close: close)
             return state.modify(with: action)
         }
@@ -377,8 +377,8 @@ extension HTTP1ConnectionStateMachine.State {
             return .pauseRequestBodyStream
         case .resumeRequestBodyStream:
             return .resumeRequestBodyStream
-        case .sendBodyPart(let part):
-            return .sendBodyPart(part)
+        case .sendBodyPart(let part, let promise):
+            return .sendBodyPart(part, promise)
         case .sendRequestEnd:
             return .sendRequestEnd
         case .forwardResponseHead(let head, let pauseRequestBodyStream):

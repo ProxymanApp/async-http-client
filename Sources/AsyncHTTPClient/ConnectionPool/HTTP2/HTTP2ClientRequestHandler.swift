@@ -148,8 +148,8 @@ final class HTTP2ClientRequestHandler: ChannelDuplexHandler {
             // that the request is neither failed nor finished yet
             self.request!.pauseRequestBodyStream()
 
-        case .sendBodyPart(let data):
-            context.writeAndFlush(self.wrapOutboundOut(.body(data)), promise: nil)
+        case .sendBodyPart(let data, let promise):
+            context.writeAndFlush(self.wrapOutboundOut(.body(data)), promise: promise)
 
         case .sendRequestEnd:
             context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
@@ -281,7 +281,7 @@ final class HTTP2ClientRequestHandler: ChannelDuplexHandler {
 
     // MARK: Private HTTPRequestExecutor
 
-    private func writeRequestBodyPart0(_ data: IOData, request: HTTPExecutableRequest) {
+    private func writeRequestBodyPart0(_ data: IOData, request: HTTPExecutableRequest, promise: EventLoopPromise<Void>?) {
         guard self.request === request, let context = self.channelContext else {
             // Because the HTTPExecutableRequest may run in a different thread to our eventLoop,
             // calls from the HTTPExecutableRequest to our ChannelHandler may arrive here after
@@ -291,7 +291,7 @@ final class HTTP2ClientRequestHandler: ChannelDuplexHandler {
             return
         }
 
-        let action = self.state.requestStreamPartReceived(data)
+        let action = self.state.requestStreamPartReceived(data, promise: promise)
         self.run(action, context: context)
     }
 
@@ -327,12 +327,12 @@ final class HTTP2ClientRequestHandler: ChannelDuplexHandler {
 }
 
 extension HTTP2ClientRequestHandler: HTTPRequestExecutor {
-    func writeRequestBodyPart(_ data: IOData, request: HTTPExecutableRequest) {
+    func writeRequestBodyPart(_ data: IOData, request: HTTPExecutableRequest, promise: EventLoopPromise<Void>?) {
         if self.eventLoop.inEventLoop {
-            self.writeRequestBodyPart0(data, request: request)
+            self.writeRequestBodyPart0(data, request: request, promise: promise)
         } else {
             self.eventLoop.execute {
-                self.writeRequestBodyPart0(data, request: request)
+                self.writeRequestBodyPart0(data, request: request, promise: promise)
             }
         }
     }

@@ -52,6 +52,7 @@ final class MockRequestExecutor {
 
     let eventLoop: EventLoop
     let pauseRequestBodyPartStreamAfterASingleWrite: Bool
+    let shouldFailWrites: Bool
 
     private let blockingQueue = BlockingQueue<RequestParts>()
     private let responseBodyDemandLock = ConditionLock(value: false)
@@ -60,8 +61,13 @@ final class MockRequestExecutor {
     private var request: HTTPExecutableRequest?
     private var _signaledDemandForRequestBody: Bool = false
 
-    init(pauseRequestBodyPartStreamAfterASingleWrite: Bool = false, eventLoop: EventLoop) {
+    init(
+        pauseRequestBodyPartStreamAfterASingleWrite: Bool = false,
+        shouldFailWrites: Bool = false,
+        eventLoop: EventLoop
+    ) {
         self.pauseRequestBodyPartStreamAfterASingleWrite = pauseRequestBodyPartStreamAfterASingleWrite
+        self.shouldFailWrites = shouldFailWrites
         self.eventLoop = eventLoop
     }
 
@@ -184,8 +190,14 @@ extension MockRequestExecutor: HTTPRequestExecutor {
     // this should always be called twice. When we receive the first call, the next call to produce
     // data is already scheduled. If we call pause here, once, after the second call new subsequent
     // calls should not be scheduled.
-    func writeRequestBodyPart(_ part: IOData, request: HTTPExecutableRequest) {
+    func writeRequestBodyPart(_ part: IOData, request: HTTPExecutableRequest, promise: EventLoopPromise<Void>?) {
         self.writeNextRequestPart(.body(part), request: request)
+
+        if self.shouldFailWrites {
+            promise?.fail(ChannelError.eof)
+        } else {
+            promise?.succeed(())
+        }
     }
 
     func finishRequestBodyStream(_ request: HTTPExecutableRequest) {

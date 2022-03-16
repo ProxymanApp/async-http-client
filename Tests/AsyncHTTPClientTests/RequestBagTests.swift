@@ -457,6 +457,41 @@ final class RequestBagTests: XCTestCase {
         XCTAssertNoThrow(try XCTUnwrap(delegate.backpressurePromise).succeed(()))
         XCTAssertEqual(delegate.hitDidReceiveResponse, 1)
     }
+
+    func testBodyPartFailedToWrite() {
+        let embeddedEventLoop = EmbeddedEventLoop()
+        defer { XCTAssertNoThrow(try embeddedEventLoop.syncShutdownGracefully()) }
+        let logger = Logger(label: "test")
+
+        var maybeRequest: HTTPClient.Request?
+        XCTAssertNoThrow(maybeRequest = try HTTPClient.Request(url: "https://swift.org", body: .string("test")))
+        guard let request = maybeRequest else { return XCTFail("Expected to have a request") }
+
+        let delegate = UploadCountingDelegate(eventLoop: embeddedEventLoop)
+        var maybeRequestBag: RequestBag<UploadCountingDelegate>?
+        XCTAssertNoThrow(maybeRequestBag = try RequestBag(
+            request: request,
+            eventLoopPreference: .delegate(on: embeddedEventLoop),
+            task: .init(eventLoop: embeddedEventLoop, logger: logger),
+            redirectHandler: nil,
+            connectionDeadline: .now() + .seconds(30),
+            requestOptions: .forTests(),
+            delegate: delegate
+        ))
+        guard let bag = maybeRequestBag else { return XCTFail("Expected to be able to create a request bag.") }
+
+        let executor = MockRequestExecutor(
+            shouldFailWrites: true,
+            eventLoop: embeddedEventLoop
+        )
+        executor.runRequest(bag)
+
+        XCTAssertEqual(delegate.hitDidSendRequestHead, 1)
+
+        bag.resumeRequestBodyStream()
+
+        XCTAssertEqual(delegate.hitDidSendRequestPart, 0)
+    }
 }
 
 class UploadCountingDelegate: HTTPClientResponseDelegate {

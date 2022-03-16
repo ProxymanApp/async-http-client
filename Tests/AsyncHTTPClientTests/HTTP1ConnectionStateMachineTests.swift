@@ -32,21 +32,21 @@ class HTTP1ConnectionStateMachineTests: XCTestCase {
         let part1 = IOData.byteBuffer(ByteBuffer(bytes: [1]))
         let part2 = IOData.byteBuffer(ByteBuffer(bytes: [2]))
         let part3 = IOData.byteBuffer(ByteBuffer(bytes: [3]))
-        XCTAssertEqual(state.requestStreamPartReceived(part0), .sendBodyPart(part0))
-        XCTAssertEqual(state.requestStreamPartReceived(part1), .sendBodyPart(part1))
+        XCTAssertEqual(state.requestStreamPartReceived(part0, promise: nil), .sendBodyPart(part0, nil))
+        XCTAssertEqual(state.requestStreamPartReceived(part1, promise: nil), .sendBodyPart(part1, nil))
 
         // oh the channel reports... we should slow down producing...
         XCTAssertEqual(state.writabilityChanged(writable: false), .pauseRequestBodyStream)
 
         // but we issued a .produceMoreRequestBodyData before... Thus, we must accept more produced
         // data
-        XCTAssertEqual(state.requestStreamPartReceived(part2), .sendBodyPart(part2))
+        XCTAssertEqual(state.requestStreamPartReceived(part2, promise: nil), .sendBodyPart(part2, nil))
         // however when we have put the data on the channel, we should not issue further
         // .produceMoreRequestBodyData events
 
         // once we receive a writable event again, we can allow the producer to produce more data
         XCTAssertEqual(state.writabilityChanged(writable: true), .resumeRequestBodyStream)
-        XCTAssertEqual(state.requestStreamPartReceived(part3), .sendBodyPart(part3))
+        XCTAssertEqual(state.requestStreamPartReceived(part3, promise: nil), .sendBodyPart(part3, nil))
         XCTAssertEqual(state.requestStreamFinished(), .sendRequestEnd)
 
         let responseHead = HTTPResponseHead(version: .http1_1, status: .ok)
@@ -186,8 +186,8 @@ class HTTP1ConnectionStateMachineTests: XCTestCase {
 
         let part0 = IOData.byteBuffer(ByteBuffer(bytes: [0]))
         let part1 = IOData.byteBuffer(ByteBuffer(bytes: [1]))
-        XCTAssertEqual(state.requestStreamPartReceived(part0), .sendBodyPart(part0))
-        XCTAssertEqual(state.requestStreamPartReceived(part1), .sendBodyPart(part1))
+        XCTAssertEqual(state.requestStreamPartReceived(part0, promise: nil), .sendBodyPart(part0, nil))
+        XCTAssertEqual(state.requestStreamPartReceived(part1, promise: nil), .sendBodyPart(part1, nil))
         XCTAssertEqual(state.requestCancelled(closeConnection: false), .failRequest(HTTPClientError.cancelled, .close))
     }
 
@@ -295,7 +295,7 @@ extension HTTP1ConnectionStateMachine.Action: Equatable {
         case (.sendRequestHead(let lhsHead, let lhsStartBody), .sendRequestHead(let rhsHead, let rhsStartBody)):
             return lhsHead == rhsHead && lhsStartBody == rhsStartBody
 
-        case (.sendBodyPart(let lhsData), .sendBodyPart(let rhsData)):
+        case (.sendBodyPart(let lhsData, _), .sendBodyPart(let rhsData, _)):
             return lhsData == rhsData
 
         case (.sendRequestEnd, .sendRequestEnd):

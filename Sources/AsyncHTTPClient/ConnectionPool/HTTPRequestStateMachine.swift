@@ -83,7 +83,7 @@ struct HTTPRequestStateMachine {
         }
 
         case sendRequestHead(HTTPRequestHead, startBody: Bool)
-        case sendBodyPart(IOData)
+        case sendBodyPart(IOData, EventLoopPromise<Void>?)
         case sendRequestEnd
 
         case pauseRequestBodyStream
@@ -261,7 +261,7 @@ struct HTTPRequestStateMachine {
         }
     }
 
-    mutating func requestStreamPartReceived(_ part: IOData) -> Action {
+    mutating func requestStreamPartReceived(_ part: IOData, promise: EventLoopPromise<Void>?) -> Action {
         switch self.state {
         case .initialized,
              .waitForChannelToBecomeWritable,
@@ -303,7 +303,7 @@ struct HTTPRequestStateMachine {
 
             self.state = .running(requestState, responseState)
 
-            return .sendBodyPart(part)
+            return .sendBodyPart(part, promise)
 
         case .failed:
             return .wait
