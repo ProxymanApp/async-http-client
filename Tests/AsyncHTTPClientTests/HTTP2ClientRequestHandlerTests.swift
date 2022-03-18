@@ -345,4 +345,37 @@ class HTTP2ClientRequestHandlerTests: XCTestCase {
             XCTAssertEqual(embedded.isActive, false)
         }
     }
+
+    func test() throws {
+        let embeddedEventLoop = EmbeddedEventLoop()
+        let requestHandler = HTTP2ClientRequestHandler(eventLoop: embeddedEventLoop)
+
+        let logger = Logger(label: "test")
+
+        var maybeRequest: HTTPClient.Request?
+        XCTAssertNoThrow(maybeRequest = try HTTPClient.Request(url: "http://localhost/", method: .POST))
+        guard let request = maybeRequest else { return XCTFail("Expected to be able to create a request") }
+
+        let delegate = ResponseAccumulator(request: request)
+        var maybeRequestBag: RequestBag<ResponseAccumulator>?
+        XCTAssertNoThrow(maybeRequestBag = try RequestBag(
+            request: request,
+            eventLoopPreference: .delegate(on: embeddedEventLoop),
+            task: .init(eventLoop: embeddedEventLoop, logger: logger),
+            redirectHandler: nil,
+            connectionDeadline: .now() + .seconds(30),
+            requestOptions: .forTests(idleReadTimeout: .milliseconds(200)),
+            delegate: delegate
+        ))
+        guard let requestBag = maybeRequestBag else { return XCTFail("Expected to be able to create a request bag") }
+
+        let promise = embeddedEventLoop.makePromise(of: Void.self)
+        requestHandler.writeRequestBodyPart(
+            .byteBuffer(.init()),
+            request: requestBag,
+            promise: promise
+        )
+
+        XCTAssertThrowsError(try promise.futureResult.wait())
+    }
 }

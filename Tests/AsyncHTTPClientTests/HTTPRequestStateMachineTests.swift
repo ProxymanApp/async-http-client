@@ -14,6 +14,7 @@
 
 @testable import AsyncHTTPClient
 import NIOCore
+import NIOEmbedded
 import NIOHTTP1
 import NIOSSL
 import XCTest
@@ -94,6 +95,8 @@ class HTTPRequestStateMachineTests: XCTestCase {
     }
 
     func testRequestBodyStreamIsCancelledIfServerRespondsWith301() {
+        let eventLoop = EmbeddedEventLoop()
+        let promise = eventLoop.makePromise(of: Void.self)
         var state = HTTPRequestStateMachine(isChannelWritable: true)
         let requestHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/", headers: HTTPHeaders([("content-length", "12")]))
         let metadata = RequestFramingMetadata(connectionClose: false, body: .fixedSize(12))
@@ -106,8 +109,9 @@ class HTTPRequestStateMachineTests: XCTestCase {
         XCTAssertEqual(state.channelRead(.head(responseHead)), .forwardResponseHead(responseHead, pauseRequestBodyStream: true))
         XCTAssertEqual(state.writabilityChanged(writable: false), .wait)
         XCTAssertEqual(state.writabilityChanged(writable: true), .wait)
-        XCTAssertEqual(state.requestStreamPartReceived(part, promise: nil), .wait,
+        XCTAssertEqual(state.requestStreamPartReceived(part, promise: promise), .wait,
                        "Expected to drop all stream data after having received a response head, with status >= 300")
+        XCTAssertThrowsError(try promise.futureResult.wait())
 
         XCTAssertEqual(state.channelRead(.end(nil)), .succeedRequest(.close, .init()))
 
@@ -116,6 +120,18 @@ class HTTPRequestStateMachineTests: XCTestCase {
 
         XCTAssertEqual(state.requestStreamFinished(), .wait,
                        "Expected to drop all stream data after having received a response head, with status >= 300")
+    }
+
+    func testStreamPartReceived_whenCanceleld() {
+        let eventLoop = EmbeddedEventLoop()
+        let promise = eventLoop.makePromise(of: Void.self)
+        var state = HTTPRequestStateMachine(isChannelWritable: false)
+        let part = IOData.byteBuffer(ByteBuffer(bytes: [0, 1, 2, 3]))
+
+        XCTAssertEqual(state.requestCancelled(), .failRequest(HTTPClientError.cancelled, .none))
+        XCTAssertEqual(state.requestStreamPartReceived(part, promise: promise), .wait,
+                       "Expected to drop all stream data after having received a response head, with status >= 300")
+        XCTAssertThrowsError(try promise.futureResult.wait())
     }
 
     func testRequestBodyStreamIsCancelledIfServerRespondsWith301WhileWriteBackpressure() {
@@ -144,6 +160,8 @@ class HTTPRequestStateMachineTests: XCTestCase {
     }
 
     func testRequestBodyStreamIsContinuedIfServerRespondsWith200() {
+        let eventLoop = EmbeddedEventLoop()
+        let promise = eventLoop.makePromise(of: Void.self)
         var state = HTTPRequestStateMachine(isChannelWritable: true)
         let requestHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/", headers: HTTPHeaders([("content-length", "12")]))
         let metadata = RequestFramingMetadata(connectionClose: false, body: .fixedSize(12))
@@ -161,6 +179,9 @@ class HTTPRequestStateMachineTests: XCTestCase {
         let part2 = IOData.byteBuffer(ByteBuffer(bytes: 8...11))
         XCTAssertEqual(state.requestStreamPartReceived(part2, promise: nil), .sendBodyPart(part2, nil))
         XCTAssertEqual(state.requestStreamFinished(), .succeedRequest(.sendRequestEnd, .init()))
+
+        XCTAssertEqual(state.requestStreamPartReceived(part2, promise: promise), .wait)
+        XCTAssertThrowsError(try promise.futureResult.wait())
     }
 
     func testRequestBodyStreamIsContinuedIfServerSendHeadWithStatus200() {

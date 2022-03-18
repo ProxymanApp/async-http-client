@@ -337,6 +337,7 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
             // the request has been popped by the state machine or the ChannelHandler has been
             // removed from the Channel pipeline. This is a normal threading issue, noone has
             // screwed up.
+            promise?.fail(ChannelError.eof)
             return
         }
 

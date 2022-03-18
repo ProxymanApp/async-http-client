@@ -912,6 +912,7 @@ public struct HTTPClientError: Error, Equatable, CustomStringConvertible {
         case unsupportedScheme(String)
         case readTimeout
         case remoteConnectionClosed
+        case failed
         case cancelled
         case identityCodingIncorrectlyPresent
         @available(*, deprecated, message: "AsyncHTTPClient now silently corrects this invalid header.")
@@ -965,6 +966,8 @@ public struct HTTPClientError: Error, Equatable, CustomStringConvertible {
     public static let readTimeout = HTTPClientError(code: .readTimeout)
     /// Remote connection was closed unexpectedly.
     public static let remoteConnectionClosed = HTTPClientError(code: .remoteConnectionClosed)
+    /// Request failed.
+    public static let failed = HTTPClientError(code: .failed)
     /// Request was cancelled.
     public static let cancelled = HTTPClientError(code: .cancelled)
     /// Request contains invalid identity encoding.

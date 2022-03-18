@@ -274,6 +274,7 @@ struct HTTPRequestStateMachine {
             // won't be interested. We expect that the producer has been informed to pause
             // producing.
             assert(producerState == .paused)
+            promise?.fail(HTTPClientError.requestStreamCancelled)
             return .wait
 
         case .running(.streaming(let expectedBodyLength, var sentBodyBytes, let producerState), let responseState):
@@ -290,6 +291,7 @@ struct HTTPRequestStateMachine {
             if let expected = expectedBodyLength, sentBodyBytes + part.readableBytes > expected {
                 let error = HTTPClientError.bodyLengthMismatch
                 self.state = .failed(error)
+                promise?.fail(error)
                 return .failRequest(error, .close)
             }
 
@@ -306,6 +308,7 @@ struct HTTPRequestStateMachine {
             return .sendBodyPart(part, promise)
 
         case .failed:
+            promise?.fail(HTTPClientError.failed)
             return .wait
 
         case .finished:
@@ -318,6 +321,7 @@ struct HTTPRequestStateMachine {
 
             // We may still receive something, here because of potential race conditions with the
             // producing thread.
+            promise?.fail(ChannelError.eof)
             return .wait
 
         case .modifying:
