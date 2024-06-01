@@ -12,105 +12,201 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.5.2) && canImport(_Concurrency)
 import NIOCore
 import NIOHTTP1
 
+/// A representation of an HTTP response for the Swift Concurrency HTTPClient API.
+///
+/// This object is similar to ``HTTPClient/Response``, but used for the Swift Concurrency API.
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-public struct HTTPClientResponse {
+public struct HTTPClientResponse: Sendable {
+    /// The HTTP version on which the response was received.
     public var version: HTTPVersion
+
+    /// The HTTP status for this response.
     public var status: HTTPResponseStatus
+
+    /// The HTTP headers of this response.
     public var headers: HTTPHeaders
+
+    /// The body of this HTTP response.
     public var body: Body
 
-    public struct Body {
-        private let bag: Transaction
-        private let reference: ResponseRef
-
-        fileprivate init(_ transaction: Transaction) {
-            self.bag = transaction
-            self.reference = ResponseRef(transaction: transaction)
-        }
-    }
-
-    init(
-        bag: Transaction,
-        version: HTTPVersion,
-        status: HTTPResponseStatus,
-        headers: HTTPHeaders
+    @inlinable public init(
+        version: HTTPVersion = .http1_1,
+        status: HTTPResponseStatus = .ok,
+        headers: HTTPHeaders = [:],
+        body: Body = Body()
     ) {
-        self.body = Body(bag)
         self.version = version
         self.status = status
         self.headers = headers
+        self.body = body
+    }
+
+    init(
+        requestMethod: HTTPMethod,
+        version: HTTPVersion,
+        status: HTTPResponseStatus,
+        headers: HTTPHeaders,
+        body: TransactionBody
+    ) {
+        self.init(
+            version: version,
+            status: status,
+            headers: headers,
+            body: .init(.transaction(
+                body,
+                expectedContentLength: HTTPClientResponse.expectedContentLength(
+                    requestMethod: requestMethod,
+                    headers: headers,
+                    status: status
+                )
+            ))
+        )
     }
 }
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-extension HTTPClientResponse.Body: AsyncSequence {
-    public typealias Element = AsyncIterator.Element
+extension HTTPClientResponse {
+    /// A representation of the response body for an HTTP response.
+    ///
+    /// The body is streamed as an `AsyncSequence` of `ByteBuffer`, where each `ByteBuffer` contains
+    /// an arbitrarily large chunk of data. The boundaries between `ByteBuffer` objects in the sequence
+    /// are entirely synthetic and have no semantic meaning.
+    public struct Body: AsyncSequence, Sendable {
+        public typealias Element = ByteBuffer
+        public struct AsyncIterator: AsyncIteratorProtocol {
+            @usableFromInline var storage: Storage.AsyncIterator
 
-    public struct AsyncIterator: AsyncIteratorProtocol {
-        private let stream: IteratorStream
+            @inlinable init(storage: Storage.AsyncIterator) {
+                self.storage = storage
+            }
 
-        fileprivate init(stream: IteratorStream) {
-            self.stream = stream
-        }
-
-        public mutating func next() async throws -> ByteBuffer? {
-            try await self.stream.next()
-        }
-    }
-
-    public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(stream: IteratorStream(bag: self.bag))
-    }
-}
-
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-extension HTTPClientResponse.Body {
-    /// The purpose of this object is to inform the transaction about the response body being deinitialized.
-    /// If the users has not called `makeAsyncIterator` on the body, before it is deinited, the http
-    /// request needs to be cancelled.
-    fileprivate class ResponseRef {
-        private let transaction: Transaction
-
-        init(transaction: Transaction) {
-            self.transaction = transaction
-        }
-
-        deinit {
-            self.transaction.responseBodyDeinited()
-        }
-    }
-}
-
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-extension HTTPClientResponse.Body {
-    internal class IteratorStream {
-        struct ID: Hashable {
-            private let objectID: ObjectIdentifier
-
-            init(_ object: IteratorStream) {
-                self.objectID = ObjectIdentifier(object)
+            @inlinable public mutating func next() async throws -> ByteBuffer? {
+                try await self.storage.next()
             }
         }
 
-        private var id: ID { ID(self) }
-        private let bag: Transaction
+        @usableFromInline var storage: Storage
 
-        init(bag: Transaction) {
-            self.bag = bag
+        @inlinable public func makeAsyncIterator() -> AsyncIterator {
+            .init(storage: self.storage.makeAsyncIterator())
         }
 
-        deinit {
-            self.bag.responseBodyIteratorDeinited(streamID: self.id)
+        @inlinable init(storage: Storage) {
+            self.storage = storage
         }
 
-        func next() async throws -> ByteBuffer? {
-            try await self.bag.nextResponsePart(streamID: self.id)
+        /// Accumulates `Body` of `ByteBuffer`s into a single `ByteBuffer`.
+        /// - Parameters:
+        ///   - maxBytes: The maximum number of bytes this method is allowed to accumulate
+        /// - Throws: `NIOTooManyBytesError` if the the sequence contains more than `maxBytes`.
+        /// - Returns: the number of bytes collected over time
+        @inlinable public func collect(upTo maxBytes: Int) async throws -> ByteBuffer {
+            switch self.storage {
+            case .transaction(_, let expectedContentLength):
+                if let contentLength = expectedContentLength {
+                    if contentLength > maxBytes {
+                        throw NIOTooManyBytesError()
+                    }
+                }
+            case .anyAsyncSequence:
+                break
+            }
+
+            /// calling collect function within here in order to ensure the correct nested type
+            func collect<Body: AsyncSequence>(_ body: Body, maxBytes: Int) async throws -> ByteBuffer where Body.Element == ByteBuffer {
+                try await body.collect(upTo: maxBytes)
+            }
+            return try await collect(self, maxBytes: maxBytes)
         }
     }
 }
 
-#endif
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension HTTPClientResponse {
+    static func expectedContentLength(requestMethod: HTTPMethod, headers: HTTPHeaders, status: HTTPResponseStatus) -> Int? {
+        if status == .notModified {
+            return 0
+        } else if requestMethod == .HEAD {
+            return 0
+        } else {
+            let contentLength = headers["content-length"].first.flatMap { Int($0, radix: 10) }
+            return contentLength
+        }
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+@usableFromInline
+typealias TransactionBody = NIOThrowingAsyncSequenceProducer<
+    ByteBuffer,
+    Error,
+    NIOAsyncSequenceProducerBackPressureStrategies.HighLowWatermark,
+    AnyAsyncSequenceProducerDelegate
+>
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension HTTPClientResponse.Body {
+    @usableFromInline enum Storage: Sendable {
+        case transaction(TransactionBody, expectedContentLength: Int?)
+        case anyAsyncSequence(AnyAsyncSequence<ByteBuffer>)
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension HTTPClientResponse.Body.Storage: AsyncSequence {
+    @usableFromInline typealias Element = ByteBuffer
+
+    @inlinable func makeAsyncIterator() -> AsyncIterator {
+        switch self {
+        case .transaction(let transaction, _):
+            return .transaction(transaction.makeAsyncIterator())
+        case .anyAsyncSequence(let anyAsyncSequence):
+            return .anyAsyncSequence(anyAsyncSequence.makeAsyncIterator())
+        }
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension HTTPClientResponse.Body.Storage {
+    @usableFromInline enum AsyncIterator {
+        case transaction(TransactionBody.AsyncIterator)
+        case anyAsyncSequence(AnyAsyncSequence<ByteBuffer>.AsyncIterator)
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension HTTPClientResponse.Body.Storage.AsyncIterator: AsyncIteratorProtocol {
+    @inlinable mutating func next() async throws -> ByteBuffer? {
+        switch self {
+        case .transaction(let iterator):
+            return try await iterator.next()
+        case .anyAsyncSequence(var iterator):
+            defer { self = .anyAsyncSequence(iterator) }
+            return try await iterator.next()
+        }
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension HTTPClientResponse.Body {
+    @inlinable init(_ storage: Storage) {
+        self.storage = storage
+    }
+
+    public init() {
+        self = .stream(EmptyCollection<ByteBuffer>().async)
+    }
+
+    @inlinable public static func stream<SequenceOfBytes>(
+        _ sequenceOfBytes: SequenceOfBytes
+    ) -> Self where SequenceOfBytes: AsyncSequence & Sendable, SequenceOfBytes.Element == ByteBuffer {
+        Self(storage: .anyAsyncSequence(AnyAsyncSequence(sequenceOfBytes.singleIteratorPrecondition)))
+    }
+
+    public static func bytes(_ byteBuffer: ByteBuffer) -> Self {
+        .stream(CollectionOfOne(byteBuffer).async)
+    }
+}

@@ -12,7 +12,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.5.2) && canImport(_Concurrency)
 import struct Foundation.URL
 import Logging
 import NIOCore
@@ -78,8 +77,8 @@ extension HTTPClient {
 
         // this loop is there to follow potential redirects
         while true {
-            let preparedRequest = try HTTPClientRequest.Prepared(currentRequest)
-            let response = try await executeCancellable(preparedRequest, deadline: deadline, logger: logger)
+            let preparedRequest = try HTTPClientRequest.Prepared(currentRequest, dnsOverride: configuration.dnsOverride)
+            let response = try await self.executeCancellable(preparedRequest, deadline: deadline, logger: logger)
 
             guard var redirectState = currentRedirectState else {
                 // a `nil` redirectState means we should not follow redirects
@@ -132,9 +131,9 @@ extension HTTPClient {
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HTTPClientResponse, Swift.Error>) -> Void in
                 let transaction = Transaction(
                     request: request,
-                    requestOptions: .init(idleReadTimeout: nil),
+                    requestOptions: .fromClientConfiguration(self.configuration),
                     logger: logger,
-                    connectionDeadline: deadline,
+                    connectionDeadline: .now() + (self.configuration.timeout.connectionCreationTimeout),
                     preferredEventLoop: eventLoop,
                     responseContinuation: continuation
                 )
@@ -215,5 +214,3 @@ private actor TransactionCancelHandler {
         }
     }
 }
-
-#endif

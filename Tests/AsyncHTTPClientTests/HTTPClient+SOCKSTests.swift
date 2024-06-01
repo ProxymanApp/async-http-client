@@ -76,7 +76,9 @@ class HTTPClientSOCKSTests: XCTestCase {
     func testProxySOCKS() throws {
         let socksBin = try MockSOCKSServer(expectedURL: "/socks/test", expectedResponse: "it works!")
         let localClient = HTTPClient(eventLoopGroupProvider: .shared(self.clientGroup),
-                                     configuration: .init(proxy: .socksServer(host: "localhost", port: socksBin.port)))
+                                     configuration: .init(
+                                         proxy: .socksServer(host: "localhost", port: socksBin.port)
+                                     ).enableFastFailureModeForTesting())
 
         defer {
             XCTAssertNoThrow(try localClient.syncShutdown())
@@ -90,8 +92,10 @@ class HTTPClientSOCKSTests: XCTestCase {
     }
 
     func testProxySOCKSBogusAddress() throws {
+        let config = HTTPClient.Configuration(proxy: .socksServer(host: "127.0.."))
+            .enableFastFailureModeForTesting()
         let localClient = HTTPClient(eventLoopGroupProvider: .shared(self.clientGroup),
-                                     configuration: .init(proxy: .socksServer(host: "127.0..")))
+                                     configuration: config)
 
         defer {
             XCTAssertNoThrow(try localClient.syncShutdown())
@@ -102,8 +106,11 @@ class HTTPClientSOCKSTests: XCTestCase {
     // there is no socks server, so we should fail
     func testProxySOCKSFailureNoServer() throws {
         let localHTTPBin = HTTPBin()
+        let config = HTTPClient.Configuration(proxy: .socksServer(host: "localhost", port: localHTTPBin.port))
+            .enableFastFailureModeForTesting()
+
         let localClient = HTTPClient(eventLoopGroupProvider: .shared(self.clientGroup),
-                                     configuration: .init(proxy: .socksServer(host: "localhost", port: localHTTPBin.port)))
+                                     configuration: config)
         defer {
             XCTAssertNoThrow(try localClient.syncShutdown())
             XCTAssertNoThrow(try localHTTPBin.shutdown())
@@ -113,8 +120,11 @@ class HTTPClientSOCKSTests: XCTestCase {
 
     // speak to a server that doesn't speak SOCKS
     func testProxySOCKSFailureInvalidServer() throws {
+        let config = HTTPClient.Configuration(proxy: .socksServer(host: "localhost"))
+            .enableFastFailureModeForTesting()
+
         let localClient = HTTPClient(eventLoopGroupProvider: .shared(self.clientGroup),
-                                     configuration: .init(proxy: .socksServer(host: "localhost")))
+                                     configuration: config)
         defer {
             XCTAssertNoThrow(try localClient.syncShutdown())
         }
@@ -124,8 +134,11 @@ class HTTPClientSOCKSTests: XCTestCase {
     // test a handshake failure with a misbehaving server
     func testProxySOCKSMisbehavingServer() throws {
         let socksBin = try MockSOCKSServer(expectedURL: "/socks/test", expectedResponse: "it works!", misbehave: true)
+        let config = HTTPClient.Configuration(proxy: .socksServer(host: "localhost", port: socksBin.port))
+            .enableFastFailureModeForTesting()
+
         let localClient = HTTPClient(eventLoopGroupProvider: .shared(self.clientGroup),
-                                     configuration: .init(proxy: .socksServer(host: "localhost", port: socksBin.port)))
+                                     configuration: config)
 
         defer {
             XCTAssertNoThrow(try localClient.syncShutdown())

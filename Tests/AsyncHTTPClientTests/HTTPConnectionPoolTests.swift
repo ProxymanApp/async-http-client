@@ -334,7 +334,7 @@ class HTTPConnectionPoolTests: XCTestCase {
 
         pool.executeRequest(requestBag)
         XCTAssertNoThrow(try eventLoop.scheduleTask(in: .seconds(1)) {}.futureResult.wait())
-        requestBag.cancel()
+        requestBag.fail(HTTPClientError.cancelled)
 
         XCTAssertThrowsError(try requestBag.task.futureResult.wait()) {
             XCTAssertEqual($0 as? HTTPClientError, .cancelled)
@@ -419,7 +419,7 @@ class HTTPConnectionPoolTests: XCTestCase {
 
         let dispatchGroup = DispatchGroup()
         for workerID in 0..<numberOfParallelWorkers {
-            DispatchQueue(label: "\(#file):\(#line):worker-\(workerID)").async(group: dispatchGroup) {
+            DispatchQueue(label: "\(#filePath):\(#line):worker-\(workerID)").async(group: dispatchGroup) {
                 func makeRequest() {
                     let url = "http://localhost:\(httpBin.port)"
                     var maybeRequest: HTTPClient.Request?

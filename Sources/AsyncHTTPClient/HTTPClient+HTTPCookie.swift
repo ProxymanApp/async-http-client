@@ -15,14 +15,17 @@
 import NIOHTTP1
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Musl)
+import Musl
 #elseif canImport(Glibc)
 import Glibc
 #endif
 import CAsyncHTTPClient
+import NIOCore
 
 extension HTTPClient {
     /// A representation of an HTTP cookie.
-    public struct Cookie {
+    public struct Cookie: Sendable {
         /// The name of the cookie.
         public var name: String
         /// The cookie's string value.

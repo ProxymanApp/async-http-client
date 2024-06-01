@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.5.2) && canImport(_Concurrency)
+import NIOCore
 
 extension HTTPClient {
     /// Shuts down the client and `EventLoopGroup` if it was created by the client.
@@ -30,5 +30,3 @@ extension HTTPClient {
         }
     }
 }
-
-#endif

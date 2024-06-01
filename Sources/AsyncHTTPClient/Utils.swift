@@ -14,12 +14,17 @@
 
 import NIOCore
 
+/// An ``HTTPClientResponseDelegate`` that wraps a callback.
+///
+/// ``HTTPClientCopyingDelegate`` discards most parts of a HTTP response, but streams the body
+/// to the `chunkHandler` provided on ``init(chunkHandler:)``. This is mostly useful for testing.
 public final class HTTPClientCopyingDelegate: HTTPClientResponseDelegate {
     public typealias Response = Void
 
     let chunkHandler: (ByteBuffer) -> EventLoopFuture<Void>
 
-    public init(chunkHandler: @escaping (ByteBuffer) -> EventLoopFuture<Void>) {
+    @preconcurrency
+    public init(chunkHandler: @Sendable @escaping (ByteBuffer) -> EventLoopFuture<Void>) {
         self.chunkHandler = chunkHandler
     }
 

@@ -35,16 +35,24 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
         didSet {
             if let newRequest = self.request {
                 var requestLogger = newRequest.logger
-                requestLogger[metadataKey: "ahc-connection-id"] = "\(self.connection.id)"
-                requestLogger[metadataKey: "ahc-el"] = "\(self.connection.channel.eventLoop)"
+                requestLogger[metadataKey: "ahc-connection-id"] = self.connectionIdLoggerMetadata
+                requestLogger[metadataKey: "ahc-el"] = "\(self.eventLoop)"
                 self.logger = requestLogger
 
                 if let idleReadTimeout = newRequest.requestOptions.idleReadTimeout {
                     self.idleReadTimeoutStateMachine = .init(timeAmount: idleReadTimeout)
                 }
+
+                if let idleWriteTimeout = newRequest.requestOptions.idleWriteTimeout {
+                    self.idleWriteTimeoutStateMachine = .init(
+                        timeAmount: idleWriteTimeout,
+                        isWritabilityEnabled: self.channelContext?.channel.isWritable ?? false
+                    )
+                }
             } else {
                 self.logger = self.backgroundLogger
                 self.idleReadTimeoutStateMachine = nil
+                self.idleWriteTimeoutStateMachine = nil
             }
         }
     }
@@ -52,22 +60,26 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
     private var idleReadTimeoutStateMachine: IdleReadStateMachine?
     private var idleReadTimeoutTimer: Scheduled<Void>?
 
+    private var idleWriteTimeoutStateMachine: IdleWriteStateMachine?
+    private var idleWriteTimeoutTimer: Scheduled<Void>?
+
     /// Cancelling a task in NIO does *not* guarantee that the task will not execute under certain race conditions.
     /// We therefore give each timer an ID and increase the ID every time we reset or cancel it.
     /// We check in the task if the timer ID has changed in the meantime and do not execute any action if has changed.
     private var currentIdleReadTimeoutTimerID: Int = 0
+    private var currentIdleWriteTimeoutTimerID: Int = 0
 
     private let backgroundLogger: Logger
     private var logger: Logger
+    private let eventLoop: EventLoop
+    private let connectionIdLoggerMetadata: Logger.MetadataValue
 
-    let connection: HTTP1Connection
-    let eventLoop: EventLoop
-
-    init(connection: HTTP1Connection, eventLoop: EventLoop, logger: Logger) {
-        self.connection = connection
+    var onConnectionIdle: () -> Void = {}
+    init(eventLoop: EventLoop, backgroundLogger: Logger, connectionIdLoggerMetadata: Logger.MetadataValue) {
         self.eventLoop = eventLoop
-        self.backgroundLogger = logger
-        self.logger = self.backgroundLogger
+        self.backgroundLogger = backgroundLogger
+        self.logger = backgroundLogger
+        self.connectionIdLoggerMetadata = connectionIdLoggerMetadata
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -106,8 +118,13 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
             "ahc-channel-writable": "\(context.channel.isWritable)",
         ])
 
+        if let timeoutAction = self.idleWriteTimeoutStateMachine?.channelWritabilityChanged(context: context) {
+            self.runTimeoutAction(timeoutAction, context: context)
+        }
+
         let action = self.state.writabilityChanged(writable: context.channel.isWritable)
         self.run(action, context: context)
+        context.fireChannelWritabilityChanged()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -149,6 +166,11 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
         self.request = req
 
         self.logger.debug("Request was scheduled on connection")
+
+        if let timeoutAction = self.idleWriteTimeoutStateMachine?.write() {
+            self.runTimeoutAction(timeoutAction, context: context)
+        }
+
         req.willExecuteRequest(self)
 
         let action = self.state.runNewRequest(
@@ -182,17 +204,39 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
 
     private func run(_ action: HTTP1ConnectionStateMachine.Action, context: ChannelHandlerContext) {
         switch action {
-        case .sendRequestHead(let head, startBody: let startBody):
-            self.sendRequestHead(head, startBody: startBody, context: context)
+        case .sendRequestHead(let head, let sendEnd):
+            self.sendRequestHead(head, sendEnd: sendEnd, context: context)
+        case .notifyRequestHeadSendSuccessfully(let resumeRequestBodyStream, let startIdleTimer):
+            // We can force unwrap the request here, as we have just validated in the state machine,
+            // that the request is neither failed nor finished yet
+            self.request!.requestHeadSent()
+            if resumeRequestBodyStream, let request = self.request {
+                // The above request head send notification might lead the request to mark itself as
+                // cancelled, which in turn might pop the request of the handler. For this reason we
+                // must check if the request is still present here.
+                request.resumeRequestBodyStream()
+            }
+            if startIdleTimer {
+                if let readTimeoutAction = self.idleReadTimeoutStateMachine?.requestEndSent() {
+                    self.runTimeoutAction(readTimeoutAction, context: context)
+                }
 
+                if let writeTimeoutAction = self.idleWriteTimeoutStateMachine?.requestEndSent() {
+                    self.runTimeoutAction(writeTimeoutAction, context: context)
+                }
+            }
         case .sendBodyPart(let part, let writePromise):
             context.writeAndFlush(self.wrapOutboundOut(.body(part)), promise: writePromise)
 
         case .sendRequestEnd(let writePromise):
             context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: writePromise)
 
-            if let timeoutAction = self.idleReadTimeoutStateMachine?.requestEndSent() {
-                self.runTimeoutAction(timeoutAction, context: context)
+            if let readTimeoutAction = self.idleReadTimeoutStateMachine?.requestEndSent() {
+                self.runTimeoutAction(readTimeoutAction, context: context)
+            }
+
+            if let writeTimeoutAction = self.idleWriteTimeoutStateMachine?.requestEndSent() {
+                self.runTimeoutAction(writeTimeoutAction, context: context)
             }
 
         case .pauseRequestBodyStream:
@@ -261,21 +305,32 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
             case .close:
                 context.close(promise: nil)
                 oldRequest.succeedRequest(buffer)
-            case .sendRequestEnd(let writePromise):
+            case .sendRequestEnd(let writePromise, let shouldClose):
                 let writePromise = writePromise ?? context.eventLoop.makePromise(of: Void.self)
                 // We need to defer succeeding the old request to avoid ordering issues
-                writePromise.futureResult.whenComplete { result in
+                writePromise.futureResult.hop(to: context.eventLoop).whenComplete { result in
                     switch result {
                     case .success:
+                        // If our final action was `sendRequestEnd`, that means we've already received
+                        // the complete response. As a result, once we've uploaded all the body parts
+                        // we need to tell the pool that the connection is idle or, if we were asked to
+                        // close when we're done, send the close. Either way, we then succeed the request
+                        if shouldClose {
+                            context.close(promise: nil)
+                        } else {
+                            self.onConnectionIdle()
+                        }
+
                         oldRequest.succeedRequest(buffer)
                     case .failure(let error):
+                        context.close(promise: nil)
                         oldRequest.fail(error)
                     }
                 }
 
                 context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: writePromise)
             case .informConnectionIsIdle:
-                self.connection.taskCompleted()
+                self.onConnectionIdle()
                 oldRequest.succeedRequest(buffer)
             }
 
@@ -292,7 +347,7 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
                 oldRequest.fail(error)
 
             case .informConnectionIsIdle:
-                self.connection.taskCompleted()
+                self.onConnectionIdle()
                 oldRequest.fail(error)
 
             case .failWritePromise(let writePromise):
@@ -308,31 +363,15 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
         }
     }
 
-    private func sendRequestHead(_ head: HTTPRequestHead, startBody: Bool, context: ChannelHandlerContext) {
-        if startBody {
-            context.writeAndFlush(self.wrapOutboundOut(.head(head)), promise: nil)
-
-            // The above write might trigger an error, which may lead to a call to `errorCaught`,
-            // which in turn, may fail the request and pop it from the handler. For this reason
-            // we must check if the request is still present here.
-            guard let request = self.request else { return }
-            request.requestHeadSent()
-            request.resumeRequestBodyStream()
-        } else {
+    private func sendRequestHead(_ head: HTTPRequestHead, sendEnd: Bool, context: ChannelHandlerContext) {
+        if sendEnd {
             context.write(self.wrapOutboundOut(.head(head)), promise: nil)
             context.write(self.wrapOutboundOut(.end(nil)), promise: nil)
             context.flush()
-
-            // The above write might trigger an error, which may lead to a call to `errorCaught`,
-            // which in turn, may fail the request and pop it from the handler. For this reason
-            // we must check if the request is still present here.
-            guard let request = self.request else { return }
-            request.requestHeadSent()
-
-            if let timeoutAction = self.idleReadTimeoutStateMachine?.requestEndSent() {
-                self.runTimeoutAction(timeoutAction, context: context)
-            }
+        } else {
+            context.writeAndFlush(self.wrapOutboundOut(.head(head)), promise: nil)
         }
+        self.run(self.state.headSent(), context: context)
     }
 
     private func runTimeoutAction(_ action: IdleReadStateMachine.Action, context: ChannelHandlerContext) {
@@ -370,6 +409,40 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
         }
     }
 
+    private func runTimeoutAction(_ action: IdleWriteStateMachine.Action, context: ChannelHandlerContext) {
+        switch action {
+        case .startIdleWriteTimeoutTimer(let timeAmount):
+            assert(self.idleWriteTimeoutTimer == nil, "Expected there is no timeout timer so far.")
+
+            let timerID = self.currentIdleWriteTimeoutTimerID
+            self.idleWriteTimeoutTimer = self.eventLoop.scheduleTask(in: timeAmount) {
+                guard self.currentIdleWriteTimeoutTimerID == timerID else { return }
+                let action = self.state.idleWriteTimeoutTriggered()
+                self.run(action, context: context)
+            }
+        case .resetIdleWriteTimeoutTimer(let timeAmount):
+            if let oldTimer = self.idleWriteTimeoutTimer {
+                oldTimer.cancel()
+            }
+
+            self.currentIdleWriteTimeoutTimerID &+= 1
+            let timerID = self.currentIdleWriteTimeoutTimerID
+            self.idleWriteTimeoutTimer = self.eventLoop.scheduleTask(in: timeAmount) {
+                guard self.currentIdleWriteTimeoutTimerID == timerID else { return }
+                let action = self.state.idleWriteTimeoutTriggered()
+                self.run(action, context: context)
+            }
+        case .clearIdleWriteTimeoutTimer:
+            if let oldTimer = self.idleWriteTimeoutTimer {
+                self.idleWriteTimeoutTimer = nil
+                self.currentIdleWriteTimeoutTimerID &+= 1
+                oldTimer.cancel()
+            }
+        case .none:
+            break
+        }
+    }
+
     // MARK: Private HTTPRequestExecutor
 
     private func writeRequestBodyPart0(_ data: IOData, request: HTTPExecutableRequest, promise: EventLoopPromise<Void>?) {
@@ -381,6 +454,10 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
             // screwed up.
             promise?.fail(HTTPClientError.requestStreamCancelled)
             return
+        }
+
+        if let timeoutAction = self.idleWriteTimeoutStateMachine?.write() {
+            self.runTimeoutAction(timeoutAction, context: context)
         }
 
         let action = self.state.requestStreamPartReceived(data, promise: promise)
@@ -418,10 +495,17 @@ final class HTTP1ClientChannelHandler: ChannelDuplexHandler {
 
         self.logger.trace("Request was cancelled")
 
+        if let timeoutAction = self.idleWriteTimeoutStateMachine?.cancelRequest() {
+            self.runTimeoutAction(timeoutAction, context: context)
+        }
+
         let action = self.state.requestCancelled(closeConnection: true)
         self.run(action, context: context)
     }
 }
+
+@available(*, unavailable)
+extension HTTP1ClientChannelHandler: Sendable {}
 
 extension HTTP1ClientChannelHandler: HTTPRequestExecutor {
     func writeRequestBodyPart(_ data: IOData, request: HTTPExecutableRequest, promise: EventLoopPromise<Void>?) {
@@ -524,6 +608,90 @@ struct IdleReadStateMachine {
 
         case .responseEndReceived:
             preconditionFailure("How can we receive more data, if we already received the response end?")
+        }
+    }
+}
+
+struct IdleWriteStateMachine {
+    enum Action {
+        case startIdleWriteTimeoutTimer(TimeAmount)
+        case resetIdleWriteTimeoutTimer(TimeAmount)
+        case clearIdleWriteTimeoutTimer
+        case none
+    }
+
+    enum State {
+        case waitingForRequestEnd
+        case waitingForWritabilityEnabled
+        case requestEndSent
+    }
+
+    private var state: State
+    private let timeAmount: TimeAmount
+
+    init(timeAmount: TimeAmount, isWritabilityEnabled: Bool) {
+        self.timeAmount = timeAmount
+        if isWritabilityEnabled {
+            self.state = .waitingForRequestEnd
+        } else {
+            self.state = .waitingForWritabilityEnabled
+        }
+    }
+
+    mutating func cancelRequest() -> Action {
+        switch self.state {
+        case .waitingForRequestEnd, .waitingForWritabilityEnabled:
+            self.state = .requestEndSent
+            return .clearIdleWriteTimeoutTimer
+        case .requestEndSent:
+            return .none
+        }
+    }
+
+    mutating func write() -> Action {
+        switch self.state {
+        case .waitingForRequestEnd:
+            return .resetIdleWriteTimeoutTimer(self.timeAmount)
+        case .waitingForWritabilityEnabled:
+            return .none
+        case .requestEndSent:
+            preconditionFailure("If the request end has been sent, we can't write more data.")
+        }
+    }
+
+    mutating func requestEndSent() -> Action {
+        switch self.state {
+        case .waitingForRequestEnd:
+            self.state = .requestEndSent
+            return .clearIdleWriteTimeoutTimer
+        case .waitingForWritabilityEnabled:
+            preconditionFailure("If the channel is not writable, we can't have sent the request end.")
+        case .requestEndSent:
+            return .none
+        }
+    }
+
+    mutating func channelWritabilityChanged(context: ChannelHandlerContext) -> Action {
+        if context.channel.isWritable {
+            switch self.state {
+            case .waitingForRequestEnd:
+                preconditionFailure("If waiting for more data, the channel was already writable.")
+            case .waitingForWritabilityEnabled:
+                self.state = .waitingForRequestEnd
+                return .startIdleWriteTimeoutTimer(self.timeAmount)
+            case .requestEndSent:
+                return .none
+            }
+        } else {
+            switch self.state {
+            case .waitingForRequestEnd:
+                self.state = .waitingForWritabilityEnabled
+                return .clearIdleWriteTimeoutTimer
+            case .waitingForWritabilityEnabled:
+                preconditionFailure("If the channel was writable before, then we should have been waiting for more data.")
+            case .requestEndSent:
+                return .none
+            }
         }
     }
 }

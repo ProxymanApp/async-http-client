@@ -1,20 +1,14 @@
 # AsyncHTTPClient
-This package provides simple HTTP Client library built on top of SwiftNIO.
+This package provides an HTTP Client library built on top of SwiftNIO.
 
 This library provides the following:
-- First class support for Swift Concurrency (since version 1.9.0)
+- First class support for Swift Concurrency
 - Asynchronous and non-blocking request methods
 - Simple follow-redirects (cookie headers are dropped)
 - Streaming body download
 - TLS support
-- Automatic HTTP/2 over HTTPS (since version 1.7.0)
+- Automatic HTTP/2 over HTTPS
 - Cookie parsing (but not storage)
-
----
-
-**NOTE**: You will need [Xcode 13.2](https://apps.apple.com/gb/app/xcode/id497799835?mt=12) or [Swift 5.5.2](https://swift.org/download/#swift-552) to try out `AsyncHTTPClient`s new async/await APIs.
-
----
 
 ## Getting Started
 
@@ -33,18 +27,12 @@ and  `AsyncHTTPClient` dependency to your target:
 
 The code snippet below illustrates how to make a simple GET request to a remote server.
 
-Please note that the example will spawn a new `EventLoopGroup` which will _create fresh threads_ which is a very costly operation. In a real-world application that uses [SwiftNIO](https://github.com/apple/swift-nio) for other parts of your application (for example a web server), please prefer `eventLoopGroupProvider: .shared(myExistingEventLoopGroup)` to share the `EventLoopGroup` used by AsyncHTTPClient with other parts of your application.
-
-If your application does not use SwiftNIO yet, it is acceptable to use `eventLoopGroupProvider: .createNew` but please make sure to share the returned `HTTPClient` instance throughout your whole application. Do not create a large number of `HTTPClient` instances with `eventLoopGroupProvider: .createNew`, this is very wasteful and might exhaust the resources of your program.
-
 ```swift
 import AsyncHTTPClient
 
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
-
 /// MARK: - Using Swift Concurrency
 let request = HTTPClientRequest(url: "https://apple.com/")
-let response = try await httpClient.execute(request, timeout: .seconds(30))
+let response = try await HTTPClient.shared.execute(request, timeout: .seconds(30))
 print("HTTP head", response)
 if response.status == .ok {
     let body = try await response.body.collect(upTo: 1024 * 1024) // 1 MB
@@ -55,7 +43,7 @@ if response.status == .ok {
 
 
 /// MARK: - Using SwiftNIO EventLoopFuture
-httpClient.get(url: "https://apple.com/").whenComplete { result in
+HTTPClient.shared.get(url: "https://apple.com/").whenComplete { result in
     switch result {
     case .failure(let error):
         // process error
@@ -69,7 +57,8 @@ httpClient.get(url: "https://apple.com/").whenComplete { result in
 }
 ```
 
-You should always shut down `HTTPClient` instances you created using `try httpClient.syncShutdown()`. Please note that you must not call `httpClient.syncShutdown` before all requests of the HTTP client have finished, or else the in-flight requests will likely fail because their network connections are interrupted.
+If you create your own `HTTPClient` instances, you should shut them down using `httpClient.shutdown()` when you're done using them. Failing to do so will leak resources.
+ Please note that you must not call `httpClient.shutdown` before all requests of the HTTP client have finished, or else the in-flight requests will likely fail because their network connections are interrupted.
 
 ### async/await examples
 
@@ -84,14 +73,13 @@ The default HTTP Method is `GET`. In case you need to have more control over the
 ```swift
 import AsyncHTTPClient
 
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
 do {
     var request = HTTPClientRequest(url: "https://apple.com/")
     request.method = .POST
     request.headers.add(name: "User-Agent", value: "Swift HTTPClient")
     request.body = .bytes(ByteBuffer(string: "some data"))
 
-    let response = try await httpClient.execute(request, timeout: .seconds(30))
+    let response = try await HTTPClient.shared.execute(request, timeout: .seconds(30))
     if response.status == .ok {
         // handle response
     } else {
@@ -100,8 +88,6 @@ do {
 } catch {
     // handle error
 }
-// it's important to shutdown the httpClient after all requests are done, even if one failed
-try await httpClient.shutdown()
 ```
 
 #### Using SwiftNIO EventLoopFuture
@@ -109,16 +95,11 @@ try await httpClient.shutdown()
 ```swift
 import AsyncHTTPClient
 
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
-defer {
-    try? httpClient.syncShutdown()
-}
-
 var request = try HTTPClient.Request(url: "https://apple.com/", method: .POST)
 request.headers.add(name: "User-Agent", value: "Swift HTTPClient")
 request.body = .string("some-body")
 
-httpClient.execute(request: request).whenComplete { result in
+HTTPClient.shared.execute(request: request).whenComplete { result in
     switch result {
     case .failure(let error):
         // process error
@@ -133,9 +114,11 @@ httpClient.execute(request: request).whenComplete { result in
 ```
 
 ### Redirects following
-Enable follow-redirects behavior using the client configuration:
+
+The globally shared instance `HTTPClient.shared` follows redirects by default. If you create your own `HTTPClient`, you can enable the follow-redirects behavior using the client configuration:
+
 ```swift
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew,
+let httpClient = HTTPClient(eventLoopGroupProvider: .singleton,
                             configuration: HTTPClient.Configuration(followRedirects: true))
 ```
 
@@ -143,7 +126,7 @@ let httpClient = HTTPClient(eventLoopGroupProvider: .createNew,
 Timeouts (connect and read) can also be set using the client configuration:
 ```swift
 let timeout = HTTPClient.Configuration.Timeout(connect: .seconds(1), read: .seconds(1))
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew,
+let httpClient = HTTPClient(eventLoopGroupProvider: .singleton,
                             configuration: HTTPClient.Configuration(timeout: timeout))
 ```
 or on a per-request basis:
@@ -152,15 +135,14 @@ httpClient.execute(request: request, deadline: .now() + .milliseconds(1))
 ```
 
 ### Streaming
-When dealing with larger amount of data, it's critical to stream the response body instead of aggregating in-memory. 
+When dealing with larger amount of data, it's critical to stream the response body instead of aggregating in-memory.
 The following example demonstrates how to count the number of bytes in a streaming response body:
 
 #### Using Swift Concurrency
 ```swift
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
 do {
     let request = HTTPClientRequest(url: "https://apple.com/")
-    let response = try await httpClient.execute(request, timeout: .seconds(30))
+    let response = try await HTTPClient.shared.execute(request, timeout: .seconds(30))
     print("HTTP head", response)
 
     // if defined, the content-length headers announces the size of the body
@@ -172,7 +154,7 @@ do {
     for try await buffer in response.body {
         // for this example, we are just interested in the size of the fragment
         receivedBytes += buffer.readableBytes
-        
+
         if let expectedBytes = expectedBytes {
             // if the body size is known, we calculate a progress indicator
             let progress = Double(receivedBytes) / Double(expectedBytes)
@@ -181,10 +163,8 @@ do {
     }
     print("did receive \(receivedBytes) bytes")
 } catch {
-    print("request failed:", error) 
+    print("request failed:", error)
 }
-// it is important to shutdown the httpClient after all requests are done, even if one failed 
-try await httpClient.shutdown()
 ```
 
 #### Using HTTPClientResponseDelegate and SwiftNIO EventLoopFuture
@@ -211,17 +191,17 @@ class CountingDelegate: HTTPClientResponseDelegate {
     }
 
     func didReceiveHead(
-        task: HTTPClient.Task<Response>, 
+        task: HTTPClient.Task<Response>,
         _ head: HTTPResponseHead
     ) -> EventLoopFuture<Void> {
-        // this is executed when we receive HTTP response head part of the request 
-        // (it contains response code and headers), called once in case backpressure 
+        // this is executed when we receive HTTP response head part of the request
+        // (it contains response code and headers), called once in case backpressure
         // is needed, all reads will be paused until returned future is resolved
         return task.eventLoop.makeSucceededFuture(())
     }
 
     func didReceiveBodyPart(
-        task: HTTPClient.Task<Response>, 
+        task: HTTPClient.Task<Response>,
         _ buffer: ByteBuffer
     ) -> EventLoopFuture<Void> {
         // this is executed when we receive parts of the response body, could be called zero or more times
@@ -244,7 +224,7 @@ class CountingDelegate: HTTPClientResponseDelegate {
 let request = try HTTPClient.Request(url: "https://apple.com/")
 let delegate = CountingDelegate()
 
-httpClient.execute(request: request, delegate: delegate).futureResult.whenSuccess { count in
+HTTPClient.shared.execute(request: request, delegate: delegate).futureResult.whenSuccess { count in
     print(count)
 }
 ```
@@ -257,7 +237,6 @@ asynchronously, while reporting the download progress at the same time, like in 
 example:
 
 ```swift
-let client = HTTPClient(eventLoopGroupProvider: .createNew)
 let request = try HTTPClient.Request(
     url: "https://swift.org/builds/development/ubuntu1804/latest-build.yml"
 )
@@ -269,7 +248,7 @@ let delegate = try FileDownloadDelegate(path: "/tmp/latest-build.yml", reportPro
     print("Downloaded \($0.receivedBytes) bytes so far")
 })
 
-client.execute(request: request, delegate: delegate).futureResult
+HTTPClient.shared.execute(request: request, delegate: delegate).futureResult
     .whenSuccess { progress in
         if let totalBytes = progress.totalBytes {
             print("Final total bytes count: \(totalBytes)")
@@ -281,21 +260,19 @@ client.execute(request: request, delegate: delegate).futureResult
 ### Unix Domain Socket Paths
 Connecting to servers bound to socket paths is easy:
 ```swift
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
-httpClient.execute(
-    .GET, 
-    socketPath: "/tmp/myServer.socket", 
+HTTPClient.shared.execute(
+    .GET,
+    socketPath: "/tmp/myServer.socket",
     urlPath: "/path/to/resource"
 ).whenComplete (...)
 ```
 
 Connecting over TLS to a unix domain socket path is possible as well:
 ```swift
-let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
-httpClient.execute(
-    .POST, 
-    secureSocketPath: "/tmp/myServer.socket", 
-    urlPath: "/path/to/resource", 
+HTTPClient.shared.execute(
+    .POST,
+    secureSocketPath: "/tmp/myServer.socket",
+    urlPath: "/path/to/resource",
     body: .string("hello")
 ).whenComplete (...)
 ```
@@ -303,11 +280,11 @@ httpClient.execute(
 Direct URLs can easily be constructed to be executed in other scenarios:
 ```swift
 let socketPathBasedURL = URL(
-    httpURLWithSocketPath: "/tmp/myServer.socket", 
+    httpURLWithSocketPath: "/tmp/myServer.socket",
     uri: "/path/to/resource"
 )
 let secureSocketPathBasedURL = URL(
-    httpsURLWithSocketPath: "/tmp/myServer.socket", 
+    httpsURLWithSocketPath: "/tmp/myServer.socket",
     uri: "/path/to/resource"
 )
 ```
@@ -318,7 +295,7 @@ The exclusive use of HTTP/1 is possible by setting `httpVersion` to `.http1Only`
 var configuration = HTTPClient.Configuration()
 configuration.httpVersion = .http1Only
 let client = HTTPClient(
-    eventLoopGroupProvider: .createNew,
+    eventLoopGroupProvider: .singleton,
     configuration: configuration
 )
 ```
@@ -326,3 +303,17 @@ let client = HTTPClient(
 ## Security
 
 Please have a look at [SECURITY.md](SECURITY.md) for AsyncHTTPClient's security process.
+
+## Supported Versions
+
+The most recent versions of AsyncHTTPClient support Swift 5.6 and newer. The minimum Swift version supported by AsyncHTTPClient releases are detailed below:
+
+AsyncHTTPClient     | Minimum Swift Version
+--------------------|----------------------
+`1.0.0 ..< 1.5.0`   | 5.0
+`1.5.0 ..< 1.10.0`  | 5.2
+`1.10.0 ..< 1.13.0` | 5.4
+`1.13.0 ..< 1.18.0` | 5.5.2
+`1.18.0 ..< 1.20.0` | 5.6
+`1.20.0 ..< 1.21.0` | 5.7
+`1.21.0 ...`        | 5.8

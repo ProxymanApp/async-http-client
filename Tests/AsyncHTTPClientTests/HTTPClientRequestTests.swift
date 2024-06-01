@@ -12,22 +12,18 @@
 //
 //===----------------------------------------------------------------------===//
 
+import Algorithms
 @testable import AsyncHTTPClient
 import NIOCore
 import XCTest
 
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 class HTTPClientRequestTests: XCTestCase {
-    #if compiler(>=5.5.2) && canImport(_Concurrency)
-    @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
     private typealias Request = HTTPClientRequest
 
-    @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
     private typealias PreparedRequest = HTTPClientRequest.Prepared
-    #endif
 
     func testCustomHeadersAreRespected() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "https://example.com/get")
             request.headers = [
@@ -40,7 +36,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .https,
                 connectionTarget: .domain(name: "example.com", port: 443),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -58,12 +55,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, ByteBuffer())
         }
-        #endif
     }
 
     func testUnixScheme() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "unix://%2Fexample%2Ffolder.sock/some_path")
             request.headers = ["custom-header": "custom-value"]
@@ -74,7 +68,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .unix,
                 connectionTarget: .unixSocket(path: "/some_path"),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -89,12 +84,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, ByteBuffer())
         }
-        #endif
     }
 
     func testHTTPUnixScheme() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http+unix://%2Fexample%2Ffolder.sock/some_path")
             request.headers = ["custom-header": "custom-value"]
@@ -105,7 +97,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .httpUnix,
                 connectionTarget: .unixSocket(path: "/example/folder.sock"),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -120,12 +113,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, ByteBuffer())
         }
-        #endif
     }
 
     func testHTTPSUnixScheme() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "https+unix://%2Fexample%2Ffolder.sock/some_path")
             request.headers = ["custom-header": "custom-value"]
@@ -136,7 +126,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .httpsUnix,
                 connectionTarget: .unixSocket(path: "/example/folder.sock"),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -151,12 +142,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, ByteBuffer())
         }
-        #endif
     }
 
     func testGetWithoutBody() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             let request = Request(url: "https://example.com/get")
             var preparedRequest: PreparedRequest?
@@ -166,7 +154,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .https,
                 connectionTarget: .domain(name: "example.com", port: 443),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -181,12 +170,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, ByteBuffer())
         }
-        #endif
     }
 
     func testPostWithoutBody() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
@@ -197,7 +183,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -216,12 +203,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, ByteBuffer())
         }
-        #endif
     }
 
     func testPostWithEmptyByteBuffer() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
@@ -233,7 +217,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -252,12 +237,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, ByteBuffer())
         }
-        #endif
     }
 
     func testPostWithByteBuffer() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
@@ -269,7 +251,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -287,16 +270,13 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, .init(string: "post body"))
         }
-        #endif
     }
 
     func testPostWithSequenceOfUnknownLength() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
-            let sequence = AnySequence(ByteBuffer(string: "post body").readableBytesView)
+            let sequence = AnySendableSequence(ByteBuffer(string: "post body").readableBytesView)
             request.body = .bytes(sequence, length: .unknown)
             var preparedRequest: PreparedRequest?
             XCTAssertNoThrow(preparedRequest = try PreparedRequest(request))
@@ -305,7 +285,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -323,17 +304,14 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, .init(string: "post body"))
         }
-        #endif
     }
 
     func testPostWithSequenceWithFixedLength() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
 
-            let sequence = AnySequence(ByteBuffer(string: "post body").readableBytesView)
+            let sequence = AnySendableSequence(ByteBuffer(string: "post body").readableBytesView)
             request.body = .bytes(sequence, length: .known(9))
             var preparedRequest: PreparedRequest?
             XCTAssertNoThrow(preparedRequest = try PreparedRequest(request))
@@ -342,7 +320,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -360,12 +339,9 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, .init(string: "post body"))
         }
-        #endif
     }
 
     func testPostWithRandomAccessCollection() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
@@ -378,7 +354,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -396,19 +373,16 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, .init(string: "post body"))
         }
-        #endif
     }
 
     func testPostWithAsyncSequenceOfUnknownLength() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
             let asyncSequence = ByteBuffer(string: "post body")
                 .readableBytesView
-                .chunked(maxChunkSize: 2)
-                .asAsyncSequence()
+                .chunks(ofCount: 2)
+                .async
                 .map { ByteBuffer($0) }
 
             request.body = .stream(asyncSequence, length: .unknown)
@@ -419,7 +393,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -437,19 +412,16 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, .init(string: "post body"))
         }
-        #endif
     }
 
     func testPostWithAsyncSequenceWithKnownLength() {
-        #if compiler(>=5.5.2) && canImport(_Concurrency)
-        guard #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) else { return }
         XCTAsyncTest {
             var request = Request(url: "http://example.com/post")
             request.method = .POST
             let asyncSequence = ByteBuffer(string: "post body")
                 .readableBytesView
-                .chunked(maxChunkSize: 2)
-                .asAsyncSequence()
+                .chunks(ofCount: 2)
+                .async
                 .map { ByteBuffer($0) }
 
             request.body = .stream(asyncSequence, length: .known(9))
@@ -460,7 +432,8 @@ class HTTPClientRequestTests: XCTestCase {
             XCTAssertEqual(preparedRequest.poolKey, .init(
                 scheme: .http,
                 connectionTarget: .domain(name: "example.com", port: 80),
-                tlsConfiguration: nil
+                tlsConfiguration: nil,
+                serverNameIndicatorOverride: nil
             ))
             XCTAssertEqual(preparedRequest.head, .init(
                 version: .http1_1,
@@ -478,22 +451,179 @@ class HTTPClientRequestTests: XCTestCase {
             guard let buffer = await XCTAssertNoThrowWithResult(try await preparedRequest.body.read()) else { return }
             XCTAssertEqual(buffer, .init(string: "post body"))
         }
-        #endif
+    }
+
+    func testChunkingRandomAccessCollection() async throws {
+        let body = try await HTTPClientRequest.Body.bytes(
+            Array(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize)
+        ).collect()
+
+        let expectedChunks = [
+            ByteBuffer(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize),
+        ]
+
+        XCTAssertEqual(body, expectedChunks)
+    }
+
+    func testChunkingCollection() async throws {
+        let body = try await HTTPClientRequest.Body.bytes(
+            (
+                String(repeating: "0", count: bagOfBytesToByteBufferConversionChunkSize) +
+                    String(repeating: "1", count: bagOfBytesToByteBufferConversionChunkSize) +
+                    String(repeating: "2", count: bagOfBytesToByteBufferConversionChunkSize)
+            ).utf8,
+            length: .known(bagOfBytesToByteBufferConversionChunkSize * 3)
+        ).collect()
+
+        let expectedChunks = [
+            ByteBuffer(repeating: UInt8(ascii: "0"), count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: UInt8(ascii: "1"), count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: UInt8(ascii: "2"), count: bagOfBytesToByteBufferConversionChunkSize),
+        ]
+
+        XCTAssertEqual(body, expectedChunks)
+    }
+
+    func testChunkingSequenceThatDoesNotImplementWithContiguousStorageIfAvailable() async throws {
+        let bagOfBytesToByteBufferConversionChunkSize = 8
+        let body = try await HTTPClientRequest.Body._bytes(
+            AnySequence(
+                Array(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize) +
+                    Array(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize)
+            ),
+            length: .known(bagOfBytesToByteBufferConversionChunkSize * 3),
+            bagOfBytesToByteBufferConversionChunkSize: bagOfBytesToByteBufferConversionChunkSize,
+            byteBufferMaxSize: byteBufferMaxSize
+        ).collect()
+
+        let expectedChunks = [
+            ByteBuffer(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize),
+        ]
+
+        XCTAssertEqual(body, expectedChunks)
+    }
+
+    func testChunkingSequenceFastPath() async throws {
+        func makeBytes() -> some Sequence<UInt8> & Sendable {
+            Array(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize)
+        }
+        let body = try await HTTPClientRequest.Body.bytes(
+            makeBytes(),
+            length: .known(bagOfBytesToByteBufferConversionChunkSize * 3)
+        ).collect()
+
+        var firstChunk = ByteBuffer(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize)
+        firstChunk.writeImmutableBuffer(ByteBuffer(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize))
+        firstChunk.writeImmutableBuffer(ByteBuffer(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize))
+        let expectedChunks = [
+            firstChunk,
+        ]
+
+        XCTAssertEqual(body, expectedChunks)
+    }
+
+    func testChunkingSequenceFastPathExceedingByteBufferMaxSize() async throws {
+        let bagOfBytesToByteBufferConversionChunkSize = 8
+        let byteBufferMaxSize = 16
+        func makeBytes() -> some Sequence<UInt8> & Sendable {
+            Array(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize)
+        }
+        let body = try await HTTPClientRequest.Body._bytes(
+            makeBytes(),
+            length: .known(bagOfBytesToByteBufferConversionChunkSize * 3),
+            bagOfBytesToByteBufferConversionChunkSize: bagOfBytesToByteBufferConversionChunkSize,
+            byteBufferMaxSize: byteBufferMaxSize
+        ).collect()
+
+        var firstChunk = ByteBuffer(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize)
+        firstChunk.writeImmutableBuffer(ByteBuffer(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize))
+        let secondChunk = ByteBuffer(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize)
+        let expectedChunks = [
+            firstChunk,
+            secondChunk,
+        ]
+
+        XCTAssertEqual(body, expectedChunks)
+    }
+
+    func testBodyStringChunking() throws {
+        let body = try HTTPClient.Body.string(
+            String(repeating: "0", count: bagOfBytesToByteBufferConversionChunkSize) +
+                String(repeating: "1", count: bagOfBytesToByteBufferConversionChunkSize) +
+                String(repeating: "2", count: bagOfBytesToByteBufferConversionChunkSize)
+        ).collect().wait()
+
+        let expectedChunks = [
+            ByteBuffer(repeating: UInt8(ascii: "0"), count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: UInt8(ascii: "1"), count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: UInt8(ascii: "2"), count: bagOfBytesToByteBufferConversionChunkSize),
+        ]
+
+        XCTAssertEqual(body, expectedChunks)
+    }
+
+    func testBodyChunkingRandomAccessCollection() throws {
+        let body = try HTTPClient.Body.bytes(
+            Array(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize) +
+                Array(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize)
+        ).collect().wait()
+
+        let expectedChunks = [
+            ByteBuffer(repeating: 0, count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: 1, count: bagOfBytesToByteBufferConversionChunkSize),
+            ByteBuffer(repeating: 2, count: bagOfBytesToByteBufferConversionChunkSize),
+        ]
+
+        XCTAssertEqual(body, expectedChunks)
     }
 }
 
-#if compiler(>=5.5.2) && canImport(_Concurrency)
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension AsyncSequence {
+    func collect() async throws -> [Element] {
+        try await self.reduce(into: []) { $0 += CollectionOfOne($1) }
+    }
+}
+
+extension HTTPClient.Body {
+    func collect() -> EventLoopFuture<[ByteBuffer]> {
+        let eelg = EmbeddedEventLoopGroup(loops: 1)
+        let el = eelg.next()
+        var body = [ByteBuffer]()
+        let writer = StreamWriter {
+            switch $0 {
+            case .byteBuffer(let byteBuffer):
+                body.append(byteBuffer)
+            case .fileRegion:
+                fatalError("file region not supported")
+            }
+            return el.makeSucceededVoidFuture()
+        }
+        return self.stream(writer).map { _ in body }
+    }
+}
+
 private struct LengthMismatch: Error {
     var announcedLength: Int
     var actualLength: Int
 }
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-extension Optional where Wrapped == HTTPClientRequest.Body {
+extension Optional where Wrapped == HTTPClientRequest.Prepared.Body {
     /// Accumulates all data from `self` into a single `ByteBuffer` and checks that the user specified length matches
     /// the length of the accumulated data.
     fileprivate func read() async throws -> ByteBuffer {
-        switch self?.mode {
+        switch self {
         case .none:
             return ByteBuffer()
         case .byteBuffer(let buffer):
@@ -518,60 +648,3 @@ extension Optional where Wrapped == HTTPClientRequest.Body {
         }
     }
 }
-
-struct ChunkedSequence<Wrapped: Collection>: Sequence {
-    struct Iterator: IteratorProtocol {
-        fileprivate var remainingElements: Wrapped.SubSequence
-        fileprivate let maxChunkSize: Int
-        mutating func next() -> Wrapped.SubSequence? {
-            guard !self.remainingElements.isEmpty else {
-                return nil
-            }
-            let chunk = self.remainingElements.prefix(self.maxChunkSize)
-            self.remainingElements = self.remainingElements.dropFirst(self.maxChunkSize)
-            return chunk
-        }
-    }
-
-    fileprivate let wrapped: Wrapped
-    fileprivate let maxChunkSize: Int
-
-    func makeIterator() -> Iterator {
-        .init(remainingElements: self.wrapped[...], maxChunkSize: self.maxChunkSize)
-    }
-}
-
-extension Collection {
-    /// Lazily splits `self` into `SubSequence`s with `maxChunkSize` elements.
-    /// - Parameter maxChunkSize: size of each chunk except the last one which can be smaller if not enough elements are remaining.
-    func chunked(maxChunkSize: Int) -> ChunkedSequence<Self> {
-        .init(wrapped: self, maxChunkSize: maxChunkSize)
-    }
-}
-
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-struct AsyncSequenceFromSyncSequence<Wrapped: Sequence>: AsyncSequence {
-    typealias Element = Wrapped.Element
-    struct AsyncIterator: AsyncIteratorProtocol {
-        fileprivate var iterator: Wrapped.Iterator
-        mutating func next() async throws -> Wrapped.Element? {
-            self.iterator.next()
-        }
-    }
-
-    fileprivate let wrapped: Wrapped
-
-    func makeAsyncIterator() -> AsyncIterator {
-        .init(iterator: self.wrapped.makeIterator())
-    }
-}
-
-@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-extension Sequence {
-    /// Turns `self` into an `AsyncSequence` by wending each element of `self` asynchronously.
-    func asAsyncSequence() -> AsyncSequenceFromSyncSequence<Self> {
-        .init(wrapped: self)
-    }
-}
-
-#endif

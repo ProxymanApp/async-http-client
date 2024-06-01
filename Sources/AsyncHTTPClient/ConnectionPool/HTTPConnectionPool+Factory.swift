@@ -47,6 +47,7 @@ protocol HTTPConnectionRequester {
     func http1ConnectionCreated(_: HTTP1Connection)
     func http2ConnectionCreated(_: HTTP2Connection, maximumStreams: Int)
     func failedToCreateHTTPConnection(_: HTTPConnectionPool.Connection.ID, error: Error)
+    func waitingForConnectivity(_: HTTPConnectionPool.Connection.ID, error: Error)
 }
 
 extension HTTPConnectionPool.ConnectionFactory {
@@ -62,7 +63,7 @@ extension HTTPConnectionPool.ConnectionFactory {
         var logger = logger
         logger[metadataKey: "ahc-connection-id"] = "\(connectionID)"
 
-        self.makeChannel(connectionID: connectionID, deadline: deadline, eventLoop: eventLoop, logger: logger).whenComplete { result in
+        self.makeChannel(requester: requester, connectionID: connectionID, deadline: deadline, eventLoop: eventLoop, logger: logger).whenComplete { result in
             switch result {
             case .success(.http1_1(let channel)):
                 do {
@@ -70,7 +71,7 @@ extension HTTPConnectionPool.ConnectionFactory {
                         channel: channel,
                         connectionID: connectionID,
                         delegate: http1ConnectionDelegate,
-                        configuration: self.clientConfiguration,
+                        decompression: self.clientConfiguration.decompression,
                         logger: logger
                     )
                     requester.http1ConnectionCreated(connection)
@@ -82,7 +83,8 @@ extension HTTPConnectionPool.ConnectionFactory {
                     channel: channel,
                     connectionID: connectionID,
                     delegate: http2ConnectionDelegate,
-                    configuration: self.clientConfiguration,
+                    decompression: self.clientConfiguration.decompression,
+                    maximumConnectionUses: self.clientConfiguration.maximumUsesPerConnection,
                     logger: logger
                 ).whenComplete { result in
                     switch result {
@@ -104,40 +106,8 @@ extension HTTPConnectionPool.ConnectionFactory {
         case http2(Channel)
     }
 
-    func makeHTTP1Channel(
-        connectionID: HTTPConnectionPool.Connection.ID,
-        deadline: NIODeadline,
-        eventLoop: EventLoop,
-        logger: Logger
-    ) -> EventLoopFuture<Channel> {
-        self.makeChannel(
-            connectionID: connectionID,
-            deadline: deadline,
-            eventLoop: eventLoop,
-            logger: logger
-        ).flatMapThrowing { negotiated -> Channel in
-
-            guard case .http1_1(let channel) = negotiated else {
-                preconditionFailure("Expected to create http/1.1 connections only for now")
-            }
-
-            // add the http1.1 channel handlers
-            let syncOperations = channel.pipeline.syncOperations
-            try syncOperations.addHTTPClientHandlers(leftOverBytesStrategy: .forwardBytes)
-
-            switch self.clientConfiguration.decompression {
-            case .disabled:
-                ()
-            case .enabled(let limit):
-                let decompressHandler = NIOHTTPResponseDecompressor(limit: limit)
-                try syncOperations.addHandler(decompressHandler)
-            }
-
-            return channel
-        }
-    }
-
-    func makeChannel(
+    func makeChannel<Requester: HTTPConnectionRequester>(
+        requester: Requester,
         connectionID: HTTPConnectionPool.Connection.ID,
         deadline: NIODeadline,
         eventLoop: EventLoop,
@@ -150,6 +120,7 @@ extension HTTPConnectionPool.ConnectionFactory {
             case .socks:
                 channelFuture = self.makeSOCKSProxyChannel(
                     proxy,
+                    requester: requester,
                     connectionID: connectionID,
                     deadline: deadline,
                     eventLoop: eventLoop,
@@ -158,6 +129,7 @@ extension HTTPConnectionPool.ConnectionFactory {
             case .http:
                 channelFuture = self.makeHTTPProxyChannel(
                     proxy,
+                    requester: requester,
                     connectionID: connectionID,
                     deadline: deadline,
                     eventLoop: eventLoop,
@@ -165,7 +137,7 @@ extension HTTPConnectionPool.ConnectionFactory {
                 )
             }
         } else {
-            channelFuture = self.makeNonProxiedChannel(deadline: deadline, eventLoop: eventLoop, logger: logger)
+            channelFuture = self.makeNonProxiedChannel(requester: requester, connectionID: connectionID, deadline: deadline, eventLoop: eventLoop, logger: logger)
         }
 
         // let's map `ChannelError.connectTimeout` into a `HTTPClientError.connectTimeout`
@@ -179,16 +151,18 @@ extension HTTPConnectionPool.ConnectionFactory {
         }
     }
 
-    private func makeNonProxiedChannel(
+    private func makeNonProxiedChannel<Requester: HTTPConnectionRequester>(
+        requester: Requester,
+        connectionID: HTTPConnectionPool.Connection.ID,
         deadline: NIODeadline,
         eventLoop: EventLoop,
         logger: Logger
     ) -> EventLoopFuture<NegotiatedProtocol> {
         switch self.key.scheme {
         case .http, .httpUnix, .unix:
-            return self.makePlainChannel(deadline: deadline, eventLoop: eventLoop).map { .http1_1($0) }
+            return self.makePlainChannel(requester: requester, connectionID: connectionID, deadline: deadline, eventLoop: eventLoop).map { .http1_1($0) }
         case .https, .httpsUnix:
-            return self.makeTLSChannel(deadline: deadline, eventLoop: eventLoop, logger: logger).flatMapThrowing {
+            return self.makeTLSChannel(requester: requester, connectionID: connectionID, deadline: deadline, eventLoop: eventLoop, logger: logger).flatMapThrowing {
                 channel, negotiated in
 
                 try self.matchALPNToHTTPVersion(negotiated, channel: channel)
@@ -196,13 +170,19 @@ extension HTTPConnectionPool.ConnectionFactory {
         }
     }
 
-    private func makePlainChannel(deadline: NIODeadline, eventLoop: EventLoop) -> EventLoopFuture<Channel> {
+    private func makePlainChannel<Requester: HTTPConnectionRequester>(
+        requester: Requester,
+        connectionID: HTTPConnectionPool.Connection.ID,
+        deadline: NIODeadline,
+        eventLoop: EventLoop
+    ) -> EventLoopFuture<Channel> {
         precondition(!self.key.scheme.usesTLS, "Unexpected scheme")
-        return self.makePlainBootstrap(deadline: deadline, eventLoop: eventLoop).connect(target: self.key.connectionTarget)
+        return self.makePlainBootstrap(requester: requester, connectionID: connectionID, deadline: deadline, eventLoop: eventLoop).connect(target: self.key.connectionTarget)
     }
 
-    private func makeHTTPProxyChannel(
+    private func makeHTTPProxyChannel<Requester: HTTPConnectionRequester>(
         _ proxy: HTTPClient.Configuration.Proxy,
+        requester: Requester,
         connectionID: HTTPConnectionPool.Connection.ID,
         deadline: NIODeadline,
         eventLoop: EventLoop,
@@ -211,7 +191,7 @@ extension HTTPConnectionPool.ConnectionFactory {
         // A proxy connection starts with a plain text connection to the proxy server. After
         // the connection has been established with the proxy server, the connection might be
         // upgraded to TLS before we send our first request.
-        let bootstrap = self.makePlainBootstrap(deadline: deadline, eventLoop: eventLoop)
+        let bootstrap = self.makePlainBootstrap(requester: requester, connectionID: connectionID, deadline: deadline, eventLoop: eventLoop)
         return bootstrap.connect(host: proxy.host, port: proxy.port).flatMap { channel in
             let encoder = HTTPRequestEncoder()
             let decoder = ByteToMessageHandler(HTTPResponseDecoder(leftOverBytesStrategy: .dropBytes))
@@ -243,8 +223,9 @@ extension HTTPConnectionPool.ConnectionFactory {
         }
     }
 
-    private func makeSOCKSProxyChannel(
+    private func makeSOCKSProxyChannel<Requester: HTTPConnectionRequester>(
         _ proxy: HTTPClient.Configuration.Proxy,
+        requester: Requester,
         connectionID: HTTPConnectionPool.Connection.ID,
         deadline: NIODeadline,
         eventLoop: EventLoop,
@@ -253,7 +234,7 @@ extension HTTPConnectionPool.ConnectionFactory {
         // A proxy connection starts with a plain text connection to the proxy server. After
         // the connection has been established with the proxy server, the connection might be
         // upgraded to TLS before we send our first request.
-        let bootstrap = self.makePlainBootstrap(deadline: deadline, eventLoop: eventLoop)
+        let bootstrap = self.makePlainBootstrap(requester: requester, connectionID: connectionID, deadline: deadline, eventLoop: eventLoop)
         return bootstrap.connect(host: proxy.host, port: proxy.port).flatMap { channel in
             let socksConnectHandler = SOCKSClientHandler(targetAddress: SOCKSAddress(self.key.connectionTarget))
             let socksEventHandler = SOCKSEventsHandler(deadline: deadline)
@@ -301,7 +282,7 @@ extension HTTPConnectionPool.ConnectionFactory {
             }
             let tlsEventHandler = TLSEventsHandler(deadline: deadline)
 
-            let sslServerHostname = self.key.connectionTarget.sslServerHostname
+            let sslServerHostname = self.key.serverNameIndicator
             let sslContextFuture = self.sslContextCache.sslContext(
                 tlsConfiguration: tlsConfig,
                 eventLoop: channel.eventLoop,
@@ -331,14 +312,21 @@ extension HTTPConnectionPool.ConnectionFactory {
         }
     }
 
-    private func makePlainBootstrap(deadline: NIODeadline, eventLoop: EventLoop) -> NIOClientTCPBootstrapProtocol {
+    private func makePlainBootstrap<Requester: HTTPConnectionRequester>(
+        requester: Requester,
+        connectionID: HTTPConnectionPool.Connection.ID,
+        deadline: NIODeadline,
+        eventLoop: EventLoop
+    ) -> NIOClientTCPBootstrapProtocol {
         #if canImport(Network)
         if #available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *), let tsBootstrap = NIOTSConnectionBootstrap(validatingGroup: eventLoop) {
             return tsBootstrap
+                .channelOption(NIOTSChannelOptions.waitForActivity, value: self.clientConfiguration.networkFrameworkWaitForConnectivity)
                 .connectTimeout(deadline - NIODeadline.now())
                 .channelInitializer { channel in
                     do {
                         try channel.pipeline.syncOperations.addHandler(HTTPClient.NWErrorHandler())
+                        try channel.pipeline.syncOperations.addHandler(NWWaitingHandler(requester: requester, connectionID: connectionID))
                         return channel.eventLoop.makeSucceededVoidFuture()
                     } catch {
                         return channel.eventLoop.makeFailedFuture(error)
@@ -355,9 +343,17 @@ extension HTTPConnectionPool.ConnectionFactory {
         preconditionFailure("No matching bootstrap found")
     }
 
-    private func makeTLSChannel(deadline: NIODeadline, eventLoop: EventLoop, logger: Logger) -> EventLoopFuture<(Channel, String?)> {
+    private func makeTLSChannel<Requester: HTTPConnectionRequester>(
+        requester: Requester,
+        connectionID: HTTPConnectionPool.Connection.ID,
+        deadline: NIODeadline,
+        eventLoop: EventLoop,
+        logger: Logger
+    ) -> EventLoopFuture<(Channel, String?)> {
         precondition(self.key.scheme.usesTLS, "Unexpected scheme")
         let bootstrapFuture = self.makeTLSBootstrap(
+            requester: requester,
+            connectionID: connectionID,
             deadline: deadline,
             eventLoop: eventLoop,
             logger: logger
@@ -366,14 +362,19 @@ extension HTTPConnectionPool.ConnectionFactory {
         var channelFuture = bootstrapFuture.flatMap { bootstrap -> EventLoopFuture<Channel> in
             return bootstrap.connect(target: self.key.connectionTarget)
         }.flatMap { channel -> EventLoopFuture<(Channel, String?)> in
-            // It is save to use `try!` here, since we are sure, that a `TLSEventsHandler` exists
-            // within the pipeline. It is added in `makeTLSBootstrap`.
-            let tlsEventHandler = try! channel.pipeline.syncOperations.handler(type: TLSEventsHandler.self)
+            do {
+                // if the channel is closed before flatMap is executed, all ChannelHandler are removed
+                // and TLSEventsHandler is therefore not present either
+                let tlsEventHandler = try channel.pipeline.syncOperations.handler(type: TLSEventsHandler.self)
 
-            // The tlsEstablishedFuture is set as soon as the TLSEventsHandler is in a
-            // pipeline. It is created in TLSEventsHandler's handlerAdded method.
-            return tlsEventHandler.tlsEstablishedFuture!.flatMap { negotiated in
-                channel.pipeline.removeHandler(tlsEventHandler).map { (channel, negotiated) }
+                // The tlsEstablishedFuture is set as soon as the TLSEventsHandler is in a
+                // pipeline. It is created in TLSEventsHandler's handlerAdded method.
+                return tlsEventHandler.tlsEstablishedFuture!.flatMap { negotiated in
+                    channel.pipeline.removeHandler(tlsEventHandler).map { (channel, negotiated) }
+                }
+            } catch {
+                assert(channel.isActive == false, "if the channel is still active then TLSEventsHandler must be present but got error \(error)")
+                return channel.eventLoop.makeFailedFuture(HTTPClientError.remoteConnectionClosed)
             }
         }
 
@@ -387,8 +388,13 @@ extension HTTPConnectionPool.ConnectionFactory {
         return channelFuture
     }
 
-    private func makeTLSBootstrap(deadline: NIODeadline, eventLoop: EventLoop, logger: Logger)
-        -> EventLoopFuture<NIOClientTCPBootstrapProtocol> {
+    private func makeTLSBootstrap<Requester: HTTPConnectionRequester>(
+        requester: Requester,
+        connectionID: HTTPConnectionPool.Connection.ID,
+        deadline: NIODeadline,
+        eventLoop: EventLoop,
+        logger: Logger
+    ) -> EventLoopFuture<NIOClientTCPBootstrapProtocol> {
         var tlsConfig = self.tlsConfiguration
         switch self.clientConfiguration.httpVersion.configuration {
         case .automatic:
@@ -404,15 +410,17 @@ extension HTTPConnectionPool.ConnectionFactory {
         #if canImport(Network)
         if #available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *), let tsBootstrap = NIOTSConnectionBootstrap(validatingGroup: eventLoop) {
             // create NIOClientTCPBootstrap with NIOTS TLS provider
-            let bootstrapFuture = tlsConfig.getNWProtocolTLSOptions(on: eventLoop).map {
+            let bootstrapFuture = tlsConfig.getNWProtocolTLSOptions(on: eventLoop, serverNameIndicatorOverride: key.serverNameIndicatorOverride).map {
                 options -> NIOClientTCPBootstrapProtocol in
 
                 tsBootstrap
+                    .channelOption(NIOTSChannelOptions.waitForActivity, value: self.clientConfiguration.networkFrameworkWaitForConnectivity)
                     .connectTimeout(deadline - NIODeadline.now())
                     .tlsOptions(options)
                     .channelInitializer { channel in
                         do {
                             try channel.pipeline.syncOperations.addHandler(HTTPClient.NWErrorHandler())
+                            try channel.pipeline.syncOperations.addHandler(NWWaitingHandler(requester: requester, connectionID: connectionID))
                             // we don't need to set a TLS deadline for NIOTS connections, since the
                             // TLS handshake is part of the TS connection bootstrap. If the TLS
                             // handshake times out the complete connection creation will be failed.
@@ -427,7 +435,6 @@ extension HTTPConnectionPool.ConnectionFactory {
         }
         #endif
 
-        let sslServerHostname = self.key.connectionTarget.sslServerHostname
         let sslContextFuture = sslContextCache.sslContext(
             tlsConfiguration: tlsConfig,
             eventLoop: eventLoop,
@@ -442,7 +449,7 @@ extension HTTPConnectionPool.ConnectionFactory {
                         let sync = channel.pipeline.syncOperations
                         let sslHandler = try NIOSSLClientHandler(
                             context: sslContext,
-                            serverHostname: sslServerHostname
+                            serverHostname: self.key.serverNameIndicator
                         )
                         let tlsEventHandler = TLSEventsHandler(deadline: deadline)
 
@@ -478,6 +485,12 @@ extension Scheme {
         case .unix, .httpUnix, .httpsUnix:
             return false
         }
+    }
+}
+
+extension ConnectionPool.Key {
+    var serverNameIndicator: String? {
+        serverNameIndicatorOverride ?? connectionTarget.sslServerHostname
     }
 }
 

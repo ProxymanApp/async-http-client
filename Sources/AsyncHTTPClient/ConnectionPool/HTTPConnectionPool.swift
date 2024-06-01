@@ -22,7 +22,7 @@ protocol HTTPConnectionPoolDelegate {
 }
 
 final class HTTPConnectionPool {
-    private let stateLock = Lock()
+    private let stateLock = NIOLock()
     private var _state: StateMachine
     /// The connection idle timeout timers. Protected by the stateLock
     private var _idleTimer = [Connection.ID: Scheduled<Void>]()
@@ -70,7 +70,9 @@ final class HTTPConnectionPool {
 
         self._state = StateMachine(
             idGenerator: idGenerator,
-            maximumConcurrentHTTP1Connections: clientConfiguration.connectionPool.concurrentHTTP1ConnectionsPerHostSoftLimit
+            maximumConcurrentHTTP1Connections: clientConfiguration.connectionPool.concurrentHTTP1ConnectionsPerHostSoftLimit,
+            retryConnectionEstablishment: clientConfiguration.connectionPool.retryConnectionEstablishment,
+            maximumConnectionUses: clientConfiguration.maximumUsesPerConnection
         )
     }
 
@@ -147,8 +149,6 @@ final class HTTPConnectionPool {
             self.unlocked = Unlocked(connection: .none, request: .none)
 
             switch stateMachineAction.request {
-            case .cancelRequestTimeout(let requestID):
-                self.locked.request = .cancelRequestTimeout(requestID)
             case .executeRequest(let request, let connection, cancelTimeout: let cancelTimeout):
                 if cancelTimeout {
                     self.locked.request = .cancelRequestTimeout(request.id)
@@ -465,6 +465,16 @@ extension HTTPConnectionPool: HTTPConnectionRequester {
         ])
         self.modifyStateAndRunActions {
             $0.failedToCreateNewConnection(error, connectionID: connectionID)
+        }
+    }
+
+    func waitingForConnectivity(_ connectionID: HTTPConnectionPool.Connection.ID, error: Error) {
+        self.logger.debug("waiting for connectivity", metadata: [
+            "ahc-error": "\(error)",
+            "ahc-connection-id": "\(connectionID)",
+        ])
+        self.modifyStateAndRunActions {
+            $0.waitingForConnectivity(error, connectionID: connectionID)
         }
     }
 }

@@ -12,24 +12,39 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.5.2) && canImport(_Concurrency)
 import struct Foundation.URL
+import NIOCore
 import NIOHTTP1
+import NIOSSL
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 extension HTTPClientRequest {
     struct Prepared {
+        enum Body {
+            case asyncSequence(
+                length: RequestBodyLength,
+                nextBodyPart: (ByteBufferAllocator) async throws -> ByteBuffer?
+            )
+            case sequence(
+                length: RequestBodyLength,
+                canBeConsumedMultipleTimes: Bool,
+                makeCompleteBody: (ByteBufferAllocator) -> ByteBuffer
+            )
+            case byteBuffer(ByteBuffer)
+        }
+
         var url: URL
         var poolKey: ConnectionPool.Key
         var requestFramingMetadata: RequestFramingMetadata
         var head: HTTPRequestHead
         var body: Body?
+        var tlsConfiguration: TLSConfiguration?
     }
 }
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 extension HTTPClientRequest.Prepared {
-    init(_ request: HTTPClientRequest) throws {
+    init(_ request: HTTPClientRequest, dnsOverride: [String: String] = [:]) throws {
         guard let url = URL(string: request.url) else {
             throw HTTPClientError.invalidURL
         }
@@ -45,7 +60,7 @@ extension HTTPClientRequest.Prepared {
 
         self.init(
             url: url,
-            poolKey: .init(url: deconstructedURL, tlsConfiguration: nil),
+            poolKey: .init(url: deconstructedURL, tlsConfiguration: request.tlsConfiguration, dnsOverride: dnsOverride),
             requestFramingMetadata: metadata,
             head: .init(
                 version: .http1_1,
@@ -53,8 +68,23 @@ extension HTTPClientRequest.Prepared {
                 uri: deconstructedURL.uri,
                 headers: headers
             ),
-            body: request.body
+            body: request.body.map { .init($0) },
+            tlsConfiguration: request.tlsConfiguration
         )
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+extension HTTPClientRequest.Prepared.Body {
+    init(_ body: HTTPClientRequest.Body) {
+        switch body.mode {
+        case .asyncSequence(let length, let makeAsyncIterator):
+            self = .asyncSequence(length: length, nextBodyPart: makeAsyncIterator())
+        case .sequence(let length, let canBeConsumedMultipleTimes, let makeCompleteBody):
+            self = .sequence(length: length, canBeConsumedMultipleTimes: canBeConsumedMultipleTimes, makeCompleteBody: makeCompleteBody)
+        case .byteBuffer(let byteBuffer):
+            self = .byteBuffer(byteBuffer)
+        }
     }
 }
 
@@ -94,5 +124,3 @@ extension HTTPClientRequest {
         return newRequest
     }
 }
-
-#endif

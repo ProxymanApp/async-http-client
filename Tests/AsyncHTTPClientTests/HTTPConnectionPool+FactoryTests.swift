@@ -46,6 +46,7 @@ class HTTPConnectionPool_FactoryTests: XCTestCase {
         )
 
         XCTAssertThrowsError(try factory.makeChannel(
+            requester: ExplodingRequester(),
             connectionID: 1,
             deadline: .now() - .seconds(1),
             eventLoop: group.next(),
@@ -76,11 +77,13 @@ class HTTPConnectionPool_FactoryTests: XCTestCase {
         let factory = HTTPConnectionPool.ConnectionFactory(
             key: .init(request),
             tlsConfiguration: nil,
-            clientConfiguration: .init(proxy: .socksServer(host: "127.0.0.1", port: server!.localAddress!.port!)),
+            clientConfiguration: .init(proxy: .socksServer(host: "127.0.0.1", port: server!.localAddress!.port!))
+                .enableFastFailureModeForTesting(),
             sslContextCache: .init()
         )
 
         XCTAssertThrowsError(try factory.makeChannel(
+            requester: ExplodingRequester(),
             connectionID: 1,
             deadline: .now() + .seconds(1),
             eventLoop: group.next(),
@@ -111,11 +114,13 @@ class HTTPConnectionPool_FactoryTests: XCTestCase {
         let factory = HTTPConnectionPool.ConnectionFactory(
             key: .init(request),
             tlsConfiguration: nil,
-            clientConfiguration: .init(proxy: .server(host: "127.0.0.1", port: server!.localAddress!.port!)),
+            clientConfiguration: .init(proxy: .server(host: "127.0.0.1", port: server!.localAddress!.port!))
+                .enableFastFailureModeForTesting(),
             sslContextCache: .init()
         )
 
         XCTAssertThrowsError(try factory.makeChannel(
+            requester: ExplodingRequester(),
             connectionID: 1,
             deadline: .now() + .seconds(1),
             eventLoop: group.next(),
@@ -148,11 +153,13 @@ class HTTPConnectionPool_FactoryTests: XCTestCase {
         let factory = HTTPConnectionPool.ConnectionFactory(
             key: .init(request),
             tlsConfiguration: nil,
-            clientConfiguration: .init(tlsConfiguration: tlsConfig),
+            clientConfiguration: .init(tlsConfiguration: tlsConfig)
+                .enableFastFailureModeForTesting(),
             sslContextCache: .init()
         )
 
         XCTAssertThrowsError(try factory.makeChannel(
+            requester: ExplodingRequester(),
             connectionID: 1,
             deadline: .now() + .seconds(1),
             eventLoop: group.next(),
@@ -169,5 +176,24 @@ class NeverrespondServerHandler: ChannelInboundHandler {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         // do nothing
+    }
+}
+
+/// A `HTTPConnectionRequester` that will fail a test if any of its methods are ever called.
+final class ExplodingRequester: HTTPConnectionRequester {
+    func http1ConnectionCreated(_: HTTP1Connection) {
+        XCTFail("http1ConnectionCreated called unexpectedly")
+    }
+
+    func http2ConnectionCreated(_: HTTP2Connection, maximumStreams: Int) {
+        XCTFail("http2ConnectionCreated called unexpectedly")
+    }
+
+    func failedToCreateHTTPConnection(_: HTTPConnectionPool.Connection.ID, error: Error) {
+        XCTFail("failedToCreateHTTPConnection called unexpectedly")
+    }
+
+    func waitingForConnectivity(_: HTTPConnectionPool.Connection.ID, error: Error) {
+        XCTFail("waitingForConnectivity called unexpectedly")
     }
 }

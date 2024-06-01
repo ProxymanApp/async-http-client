@@ -12,12 +12,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.5.2) && canImport(_Concurrency)
 import NIOConcurrencyHelpers
 import NIOCore
 
+/// ``AsyncSequenceWriter`` is `Sendable` because its state is protected by a Lock
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-class AsyncSequenceWriter<Element>: AsyncSequence {
+final class AsyncSequenceWriter<Element>: AsyncSequence, @unchecked Sendable {
     typealias AsyncIterator = Iterator
 
     struct Iterator: AsyncIteratorProtocol {
@@ -44,7 +44,7 @@ class AsyncSequenceWriter<Element>: AsyncSequence {
     }
 
     private var _state = State.buffering(.init(), nil)
-    private let lock = Lock()
+    private let lock = NIOLock()
 
     public var hasDemand: Bool {
         self.lock.withLock {
@@ -191,4 +191,3 @@ class AsyncSequenceWriter<Element>: AsyncSequence {
         }
     }
 }
-#endif

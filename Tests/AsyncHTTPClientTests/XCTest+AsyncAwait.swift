@@ -26,11 +26,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#if compiler(>=5.5.2) && canImport(_Concurrency)
+
 import XCTest
 
 extension XCTestCase {
-    @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
     /// Cross-platform XCTest support for async-await tests.
     ///
     /// Currently the Linux implementation of XCTest doesn't have async-await support.
@@ -39,6 +38,7 @@ extension XCTestCase {
     ///
     /// - NOTE: Support for Linux is tracked by https://bugs.swift.org/browse/SR-14403.
     /// - NOTE: Implementation currently in progress: https://github.com/apple/swift-corelibs-xctest/pull/326
+    @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
     func XCTAsyncTest(
         expectationDescription: String = "Async operation",
         timeout: TimeInterval = 30,
@@ -65,7 +65,7 @@ extension XCTestCase {
 internal func XCTAssertThrowsError<T>(
     _ expression: @autoclosure () async throws -> T,
     verify: (Error) -> Void = { _ in },
-    file: StaticString = #file,
+    file: StaticString = #filePath,
     line: UInt = #line
 ) async {
     do {
@@ -79,7 +79,7 @@ internal func XCTAssertThrowsError<T>(
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 internal func XCTAssertNoThrowWithResult<Result>(
     _ expression: @autoclosure () async throws -> Result,
-    file: StaticString = #file,
+    file: StaticString = #filePath,
     line: UInt = #line
 ) async -> Result? {
     do {
@@ -89,5 +89,3 @@ internal func XCTAssertNoThrowWithResult<Result>(
     }
     return nil
 }
-
-#endif

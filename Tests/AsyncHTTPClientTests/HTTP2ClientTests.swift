@@ -25,7 +25,7 @@ import XCTest
 
 class HTTP2ClientTests: XCTestCase {
     func makeDefaultHTTPClient(
-        eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider = .createNew
+        eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider = .singleton
     ) -> HTTPClient {
         var config = HTTPClient.Configuration()
         config.tlsConfiguration = .clientDefault
@@ -40,7 +40,7 @@ class HTTP2ClientTests: XCTestCase {
 
     func makeClientWithActiveHTTP2Connection<RequestHandler>(
         to bin: HTTPBin<RequestHandler>,
-        eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider = .createNew
+        eventLoopGroupProvider: HTTPClient.EventLoopGroupProvider = .singleton
     ) -> HTTPClient {
         let client = self.makeDefaultHTTPClient(eventLoopGroupProvider: eventLoopGroupProvider)
         var response: HTTPClient.Response?
@@ -287,7 +287,7 @@ class HTTP2ClientTests: XCTestCase {
         )
 
         XCTAssertThrowsError(try task.futureResult.timeout(after: .seconds(2)).wait()) {
-            XCTAssertEqual($0 as? HTTPClientError, .cancelled)
+            XCTAssertEqualTypeAndValue($0, HTTPClientError.cancelled)
         }
     }
 
@@ -301,7 +301,7 @@ class HTTP2ClientTests: XCTestCase {
         config.httpVersion = .automatic
         config.timeout.read = .milliseconds(100)
         let client = HTTPClient(
-            eventLoopGroupProvider: .createNew,
+            eventLoopGroupProvider: .singleton,
             configuration: config,
             backgroundActivityLogger: Logger(label: "HTTPClient", factory: StreamLogHandler.standardOutput(label:))
         )
@@ -322,7 +322,8 @@ class HTTP2ClientTests: XCTestCase {
         config.tlsConfiguration = tlsConfig
         config.httpVersion = .automatic
         let client = HTTPClient(
-            eventLoopGroupProvider: .createNew,
+            // TODO: Test fails if the provided ELG is a multi-threaded NIOTSEventLoopGroup (probably racy)
+            eventLoopGroupProvider: .shared(bin.group),
             configuration: config,
             backgroundActivityLogger: Logger(label: "HTTPClient", factory: StreamLogHandler.standardOutput(label:))
         )
@@ -375,7 +376,7 @@ class HTTP2ClientTests: XCTestCase {
     }
 
     func testPlatformConnectErrorIsForwardedOnTimeout() {
-        let bin = HTTPBin(.http2(compress: false))
+        let bin = HTTPBin(.http2(compress: false), reusePort: true)
         let clientGroup = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let el1 = clientGroup.next()
         let el2 = clientGroup.next()
@@ -403,20 +404,22 @@ class HTTP2ClientTests: XCTestCase {
         XCTAssertEqual(.ok, response1?.status)
         XCTAssertEqual(response1?.version, .http2)
         let serverPort = bin.port
-        XCTAssertNoThrow(try bin.shutdown())
-        // client is now in HTTP/2 state and the HTTPBin is closed
-        // start a new server on the old port which closes all connections immediately
+
         let serverGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { XCTAssertNoThrow(try serverGroup.syncShutdownGracefully()) }
         var maybeServer: Channel?
         XCTAssertNoThrow(maybeServer = try ServerBootstrap(group: serverGroup)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEPORT), value: 1)
             .childChannelInitializer { channel in
                 channel.close()
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .bind(host: "127.0.0.1", port: serverPort)
             .wait())
+        // shutting down the old server closes all connections immediately
+        XCTAssertNoThrow(try bin.shutdown())
+        // client is now in HTTP/2 state and the HTTPBin is closed
         guard let server = maybeServer else { return }
         defer { XCTAssertNoThrow(try server.close().wait()) }
 
@@ -431,6 +434,19 @@ class HTTP2ClientTests: XCTestCase {
                 "error should be some platform specific error that the connection is closed/reset by the other side"
             )
         }
+    }
+
+    func testMassiveDownload() {
+        let bin = HTTPBin(.http2(compress: false))
+        defer { XCTAssertNoThrow(try bin.shutdown()) }
+        let client = self.makeDefaultHTTPClient()
+        defer { XCTAssertNoThrow(try client.syncShutdown()) }
+        var response: HTTPClient.Response?
+        XCTAssertNoThrow(response = try client.get(url: "https://localhost:\(bin.port)/mega-chunked").wait())
+
+        XCTAssertEqual(.ok, response?.status)
+        XCTAssertEqual(response?.version, .http2)
+        XCTAssertEqual(response?.body?.readableBytes, 10_000)
     }
 }
 

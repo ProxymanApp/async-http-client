@@ -12,7 +12,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if compiler(>=5.5.2) && canImport(_Concurrency)
 import Logging
 import NIOConcurrencyHelpers
 import NIOCore
@@ -20,7 +19,7 @@ import NIOHTTP1
 import NIOSSL
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-final class Transaction: @unchecked Sendable {
+@usableFromInline final class Transaction: @unchecked Sendable {
     let logger: Logger
 
     let request: HTTPClientRequest.Prepared
@@ -29,7 +28,7 @@ final class Transaction: @unchecked Sendable {
     let preferredEventLoop: EventLoop
     let requestOptions: RequestOptions
 
-    private let stateLock = Lock()
+    private let stateLock = NIOLock()
     private var state: StateMachine
 
     init(
@@ -49,7 +48,7 @@ final class Transaction: @unchecked Sendable {
     }
 
     func cancel() {
-        self.fail(HTTPClientError.cancelled)
+        self.fail(CancellationError())
     }
 
     // MARK: Request body helpers
@@ -131,9 +130,8 @@ final class Transaction: @unchecked Sendable {
             // an error/cancellation has happened. nothing to do.
             break
 
-        case .forwardStreamFinished(let executor, let succeedContinuation):
+        case .forwardStreamFinished(let executor):
             executor.finishRequestBodyStream(self, promise: nil)
-            succeedContinuation?.resume(returning: nil)
         }
         return
     }
@@ -148,7 +146,7 @@ final class Transaction: @unchecked Sendable {
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 extension Transaction: HTTPSchedulableRequest {
     var poolKey: ConnectionPool.Key { self.request.poolKey }
-    var tlsConfiguration: TLSConfiguration? { return nil }
+    var tlsConfiguration: TLSConfiguration? { return self.request.tlsConfiguration }
     var requiredEventLoop: EventLoop? { return nil }
 
     func requestWasQueued(_ scheduler: HTTPRequestScheduler) {
@@ -174,7 +172,9 @@ extension Transaction: HTTPExecutableRequest {
         switch action {
         case .cancel(let executor):
             executor.cancelRequest(self)
-
+        case .cancelAndFail(let executor, let continuation, with: let error):
+            executor.cancelRequest(self)
+            continuation.resume(throwing: error)
         case .none:
             break
         }
@@ -192,7 +192,7 @@ extension Transaction: HTTPExecutableRequest {
             break
 
         case .startStream(let allocator):
-            switch self.request.body?.mode {
+            switch self.request.body {
             case .asyncSequence(_, let next):
                 // it is safe to call this async here. it dispatches...
                 self.continueRequestBodyStream(allocator, next: next)
@@ -223,21 +223,22 @@ extension Transaction: HTTPExecutableRequest {
 
     func receiveResponseHead(_ head: HTTPResponseHead) {
         let action = self.stateLock.withLock {
-            self.state.receiveResponseHead(head)
+            self.state.receiveResponseHead(head, delegate: self)
         }
 
         switch action {
         case .none:
             break
 
-        case .succeedResponseHead(let head, let continuation):
-            let asyncResponse = HTTPClientResponse(
-                bag: self,
+        case .succeedResponseHead(let body, let continuation):
+            let response = HTTPClientResponse(
+                requestMethod: self.requestHead.method,
                 version: head.version,
                 status: head.status,
-                headers: head.headers
+                headers: head.headers,
+                body: body
             )
-            continuation.resume(returning: asyncResponse)
+            continuation.resume(returning: response)
         }
     }
 
@@ -248,8 +249,13 @@ extension Transaction: HTTPExecutableRequest {
         switch action {
         case .none:
             break
-        case .succeedContinuation(let continuation, let bytes):
-            continuation.resume(returning: bytes)
+        case .yieldResponseBodyParts(let source, let responseBodyParts, let executer):
+            switch source.yield(contentsOf: responseBodyParts) {
+            case .dropped, .stopProducing:
+                break
+            case .produceMore:
+                executer.demandResponseBodyStream(self)
+            }
         }
     }
 
@@ -258,10 +264,12 @@ extension Transaction: HTTPExecutableRequest {
             self.state.succeedRequest(buffer)
         }
         switch succeedAction {
-        case .finishResponseStream(let continuation):
-            continuation.resume(returning: nil)
-        case .succeedContinuation(let continuation, let byteBuffer):
-            continuation.resume(returning: byteBuffer)
+        case .finishResponseStream(let source, let finalResponse):
+            if let finalResponse = finalResponse {
+                _ = source.yield(contentsOf: finalResponse)
+            }
+            source.finish()
+
         case .none:
             break
         }
@@ -285,9 +293,9 @@ extension Transaction: HTTPExecutableRequest {
             scheduler?.cancelRequest(self) // NOTE: scheduler and executor are exclusive here
             executor?.cancelRequest(self)
 
-        case .failResponseStream(let continuation, let error, let executor, let bodyStreamContinuation):
-            continuation.resume(throwing: error)
-            bodyStreamContinuation?.resume(throwing: error)
+        case .failResponseStream(let source, let error, let executor, let requestBodyStreamContinuation):
+            source.finish(error)
+            requestBodyStreamContinuation?.resume(throwing: error)
             executor.cancelRequest(self)
 
         case .failRequestStreamContinuation(let bodyStreamContinuation, let error):
@@ -309,7 +317,8 @@ extension Transaction: HTTPExecutableRequest {
             scheduler?.cancelRequest(self)
             executor?.cancelRequest(self)
             bodyStreamContinuation?.resume(throwing: HTTPClientError.deadlineExceeded)
-
+        case .cancelSchedulerOnly(scheduler: let scheduler):
+            scheduler.cancelRequest(self)
         case .none:
             break
         }
@@ -317,46 +326,22 @@ extension Transaction: HTTPExecutableRequest {
 }
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
-extension Transaction {
-    func responseBodyDeinited() {
-        let deinitedAction = self.stateLock.withLock {
-            self.state.responseBodyDeinited()
+extension Transaction: NIOAsyncSequenceProducerDelegate {
+    @usableFromInline
+    func produceMore() {
+        let action = self.stateLock.withLock {
+            self.state.produceMore()
         }
-
-        switch deinitedAction {
-        case .cancel(let executor):
-            executor.cancelRequest(self)
+        switch action {
         case .none:
             break
+        case .requestMoreResponseBodyParts(let executer):
+            executer.demandResponseBodyStream(self)
         }
     }
 
-    func nextResponsePart(streamID: HTTPClientResponse.Body.IteratorStream.ID) async throws -> ByteBuffer? {
-        try await withCheckedThrowingContinuation { continuation in
-            let action = self.stateLock.withLock {
-                self.state.consumeNextResponsePart(streamID: streamID, continuation: continuation)
-            }
-            switch action {
-            case .succeedContinuation(let continuation, let result):
-                continuation.resume(returning: result)
-
-            case .failContinuation(let continuation, let error):
-                continuation.resume(throwing: error)
-
-            case .askExecutorForMore(let executor):
-                executor.demandResponseBodyStream(self)
-
-            case .none:
-                return
-            }
-        }
-    }
-
-    func responseBodyIteratorDeinited(streamID: HTTPClientResponse.Body.IteratorStream.ID) {
-        let action = self.stateLock.withLock {
-            self.state.responseBodyIteratorDeinited(streamID: streamID)
-        }
-        self.performFailAction(action)
+    @usableFromInline
+    func didTerminate() {
+        self.fail(HTTPClientError.cancelled)
     }
 }
-#endif

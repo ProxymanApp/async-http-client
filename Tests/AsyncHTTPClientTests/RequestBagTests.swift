@@ -17,6 +17,7 @@ import Logging
 import NIOCore
 import NIOEmbedded
 import NIOHTTP1
+import NIOPosix
 import XCTest
 
 final class RequestBagTests: XCTestCase {
@@ -219,12 +220,92 @@ final class RequestBagTests: XCTestCase {
         XCTAssert(bag.eventLoop === embeddedEventLoop)
 
         let executor = MockRequestExecutor(eventLoop: embeddedEventLoop)
-        bag.cancel()
+        bag.fail(HTTPClientError.cancelled)
 
         bag.willExecuteRequest(executor)
         XCTAssertTrue(executor.isCancelled, "The request bag, should call cancel immediately on the executor")
         XCTAssertThrowsError(try bag.task.futureResult.wait()) {
             XCTAssertEqual($0 as? HTTPClientError, .cancelled)
+        }
+    }
+
+    func testDeadlineExceededFailsTaskEvenIfRaceBetweenCancelingSchedulerAndRequestStart() {
+        let embeddedEventLoop = EmbeddedEventLoop()
+        defer { XCTAssertNoThrow(try embeddedEventLoop.syncShutdownGracefully()) }
+        let logger = Logger(label: "test")
+
+        var maybeRequest: HTTPClient.Request?
+        XCTAssertNoThrow(maybeRequest = try HTTPClient.Request(url: "https://swift.org"))
+        guard let request = maybeRequest else { return XCTFail("Expected to have a request") }
+
+        let delegate = UploadCountingDelegate(eventLoop: embeddedEventLoop)
+        var maybeRequestBag: RequestBag<UploadCountingDelegate>?
+        XCTAssertNoThrow(maybeRequestBag = try RequestBag(
+            request: request,
+            eventLoopPreference: .delegate(on: embeddedEventLoop),
+            task: .init(eventLoop: embeddedEventLoop, logger: logger),
+            redirectHandler: nil,
+            connectionDeadline: .now() + .seconds(30),
+            requestOptions: .forTests(),
+            delegate: delegate
+        ))
+        guard let bag = maybeRequestBag else { return XCTFail("Expected to be able to create a request bag.") }
+        XCTAssert(bag.eventLoop === embeddedEventLoop)
+
+        let queuer = MockTaskQueuer()
+        bag.requestWasQueued(queuer)
+
+        let executor = MockRequestExecutor(eventLoop: embeddedEventLoop)
+        XCTAssertEqual(queuer.hitCancelCount, 0)
+        bag.deadlineExceeded()
+        XCTAssertEqual(queuer.hitCancelCount, 1)
+
+        bag.willExecuteRequest(executor)
+        XCTAssertTrue(executor.isCancelled, "The request bag, should call cancel immediately on the executor")
+        XCTAssertThrowsError(try bag.task.futureResult.wait()) {
+            XCTAssertEqual($0 as? HTTPClientError, .deadlineExceeded)
+        }
+    }
+
+    func testCancelHasNoEffectAfterDeadlineExceededFailsTask() {
+        struct MyError: Error, Equatable {}
+        let embeddedEventLoop = EmbeddedEventLoop()
+        defer { XCTAssertNoThrow(try embeddedEventLoop.syncShutdownGracefully()) }
+        let logger = Logger(label: "test")
+
+        var maybeRequest: HTTPClient.Request?
+        XCTAssertNoThrow(maybeRequest = try HTTPClient.Request(url: "https://swift.org"))
+        guard let request = maybeRequest else { return XCTFail("Expected to have a request") }
+
+        let delegate = UploadCountingDelegate(eventLoop: embeddedEventLoop)
+        var maybeRequestBag: RequestBag<UploadCountingDelegate>?
+        XCTAssertNoThrow(maybeRequestBag = try RequestBag(
+            request: request,
+            eventLoopPreference: .delegate(on: embeddedEventLoop),
+            task: .init(eventLoop: embeddedEventLoop, logger: logger),
+            redirectHandler: nil,
+            connectionDeadline: .now() + .seconds(30),
+            requestOptions: .forTests(),
+            delegate: delegate
+        ))
+        guard let bag = maybeRequestBag else { return XCTFail("Expected to be able to create a request bag.") }
+        XCTAssert(bag.eventLoop === embeddedEventLoop)
+
+        let queuer = MockTaskQueuer()
+        bag.requestWasQueued(queuer)
+
+        XCTAssertEqual(queuer.hitCancelCount, 0)
+        bag.deadlineExceeded()
+        XCTAssertEqual(queuer.hitCancelCount, 1)
+        XCTAssertEqual(delegate.hitDidReceiveError, 0)
+        bag.fail(MyError())
+        XCTAssertEqual(delegate.hitDidReceiveError, 1)
+
+        bag.fail(HTTPClientError.cancelled)
+        XCTAssertEqual(delegate.hitDidReceiveError, 1)
+
+        XCTAssertThrowsError(try bag.task.futureResult.wait()) {
+            XCTAssertEqualTypeAndValue($0, MyError())
         }
     }
 
@@ -261,10 +342,10 @@ final class RequestBagTests: XCTestCase {
         XCTAssertEqual(delegate.hitDidSendRequestHead, 1)
         XCTAssertEqual(delegate.hitDidSendRequest, 1)
 
-        bag.cancel()
+        bag.fail(HTTPClientError.cancelled)
         XCTAssertTrue(executor.isCancelled, "The request bag, should call cancel immediately on the executor")
 
-        XCTAssertThrowsError(try bag.task.futureResult.wait()) {
+        XCTAssertThrowsError(try bag.task.futureResult.timeout(after: .seconds(10)).wait()) {
             XCTAssertEqual($0 as? HTTPClientError, .cancelled)
         }
     }
@@ -295,7 +376,7 @@ final class RequestBagTests: XCTestCase {
         bag.requestWasQueued(queuer)
 
         XCTAssertEqual(queuer.hitCancelCount, 0)
-        bag.cancel()
+        bag.fail(HTTPClientError.cancelled)
         XCTAssertEqual(queuer.hitCancelCount, 1)
 
         XCTAssertThrowsError(try bag.task.futureResult.wait()) {
@@ -364,14 +445,81 @@ final class RequestBagTests: XCTestCase {
         let executor = MockRequestExecutor(eventLoop: embeddedEventLoop)
         executor.runRequest(bag)
 
-        // This simulates a race between the user cancelling the task (which invokes `RequestBag.cancel`) and the
+        // This simulates a race between the user cancelling the task (which invokes `RequestBag.fail(_:)`) and the
         // call to `resumeRequestBodyStream` (which comes from the `Channel` event loop and so may have to hop.
-        bag.cancel()
+        bag.fail(HTTPClientError.cancelled)
         bag.resumeRequestBodyStream()
 
         XCTAssertEqual(executor.isCancelled, true)
         XCTAssertThrowsError(try bag.task.futureResult.wait()) {
             XCTAssertEqual($0 as? HTTPClientError, .cancelled)
+        }
+    }
+
+    func testDidReceiveBodyPartFailedPromise() {
+        let embeddedEventLoop = EmbeddedEventLoop()
+        defer { XCTAssertNoThrow(try embeddedEventLoop.syncShutdownGracefully()) }
+        let logger = Logger(label: "test")
+
+        var maybeRequest: HTTPClient.Request?
+
+        XCTAssertNoThrow(maybeRequest = try HTTPClient.Request(
+            url: "https://swift.org",
+            method: .POST,
+            body: .byteBuffer(.init(bytes: [1]))
+        ))
+        guard let request = maybeRequest else { return XCTFail("Expected to have a request") }
+
+        struct MyError: Error, Equatable {}
+        final class Delegate: HTTPClientResponseDelegate {
+            typealias Response = Void
+            let didFinishPromise: EventLoopPromise<Void>
+            init(didFinishPromise: EventLoopPromise<Void>) {
+                self.didFinishPromise = didFinishPromise
+            }
+
+            func didReceiveBodyPart(task: HTTPClient.Task<Void>, _ buffer: ByteBuffer) -> EventLoopFuture<Void> {
+                task.eventLoop.makeFailedFuture(MyError())
+            }
+
+            func didReceiveError(task: HTTPClient.Task<Void>, _ error: Error) {
+                self.didFinishPromise.fail(error)
+            }
+
+            func didFinishRequest(task: AsyncHTTPClient.HTTPClient.Task<Void>) throws {
+                XCTFail("\(#function) should not be called")
+                self.didFinishPromise.succeed(())
+            }
+        }
+        let delegate = Delegate(didFinishPromise: embeddedEventLoop.makePromise())
+        var maybeRequestBag: RequestBag<Delegate>?
+        XCTAssertNoThrow(maybeRequestBag = try RequestBag(
+            request: request,
+            eventLoopPreference: .delegate(on: embeddedEventLoop),
+            task: .init(eventLoop: embeddedEventLoop, logger: logger),
+            redirectHandler: nil,
+            connectionDeadline: .now() + .seconds(30),
+            requestOptions: .forTests(),
+            delegate: delegate
+        ))
+        guard let bag = maybeRequestBag else { return XCTFail("Expected to be able to create a request bag.") }
+
+        let executor = MockRequestExecutor(eventLoop: embeddedEventLoop)
+
+        executor.runRequest(bag)
+
+        bag.resumeRequestBodyStream()
+        XCTAssertNoThrow(try executor.receiveRequestBody { XCTAssertEqual($0, ByteBuffer(bytes: [1])) })
+
+        bag.receiveResponseHead(.init(version: .http1_1, status: .ok))
+
+        bag.succeedRequest([ByteBuffer([1])])
+
+        XCTAssertThrowsError(try delegate.didFinishPromise.futureResult.wait()) { error in
+            XCTAssertEqualTypeAndValue(error, MyError())
+        }
+        XCTAssertThrowsError(try bag.task.futureResult.wait()) { error in
+            XCTAssertEqualTypeAndValue(error, MyError())
         }
     }
 
@@ -689,6 +837,65 @@ final class RequestBagTests: XCTestCase {
 
         XCTAssertTrue(redirectTriggered)
     }
+
+    func testWeDontLeakTheRequestIfTheRequestWriterWasCapturedByAPromise() {
+        final class LeakDetector {}
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { XCTAssertNoThrow(try group.syncShutdownGracefully()) }
+
+        let httpClient = HTTPClient(eventLoopGroupProvider: .shared(group))
+        defer { XCTAssertNoThrow(try httpClient.shutdown().wait()) }
+
+        let httpBin = HTTPBin()
+        defer { XCTAssertNoThrow(try httpBin.shutdown()) }
+
+        var leakDetector = LeakDetector()
+
+        do {
+            var maybeRequest: HTTPClient.Request?
+            XCTAssertNoThrow(maybeRequest = try HTTPClient.Request(url: "http://localhost:\(httpBin.port)/", method: .POST))
+            guard var request = maybeRequest else { return XCTFail("Expected to have a request here") }
+
+            let writerPromise = group.any().makePromise(of: HTTPClient.Body.StreamWriter.self)
+            let donePromise = group.any().makePromise(of: Void.self)
+            request.body = .stream { [leakDetector] writer in
+                _ = leakDetector
+                writerPromise.succeed(writer)
+                return donePromise.futureResult
+            }
+
+            let resultFuture = httpClient.execute(request: request)
+            request.body = nil
+            writerPromise.futureResult.whenSuccess { writer in
+                writer.write(.byteBuffer(ByteBuffer(string: "hello"))).map {
+                    print("written")
+                }.cascade(to: donePromise)
+            }
+            XCTAssertNoThrow(try donePromise.futureResult.wait())
+            print("HTTP sent")
+
+            var result: HTTPClient.Response?
+            XCTAssertNoThrow(result = try resultFuture.wait())
+
+            XCTAssertEqual(.ok, result?.status)
+            let body = result?.body.map { String(buffer: $0) }
+            XCTAssertNotNil(body)
+            print("HTTP done")
+        }
+        XCTAssertTrue(isKnownUniquelyReferenced(&leakDetector))
+    }
+}
+
+extension HTTPClient.Task {
+    convenience init(
+        eventLoop: EventLoop,
+        logger: Logger
+    ) {
+        self.init(eventLoop: eventLoop, logger: logger) {
+            preconditionFailure("thread pool not needed in tests")
+        }
+    }
 }
 
 class UploadCountingDelegate: HTTPClientResponseDelegate {
@@ -754,20 +961,31 @@ class UploadCountingDelegate: HTTPClientResponseDelegate {
     }
 }
 
-class MockTaskQueuer: HTTPRequestScheduler {
+final class MockTaskQueuer: HTTPRequestScheduler {
     private(set) var hitCancelCount = 0
 
-    init() {}
+    let onCancelRequest: (@Sendable (HTTPSchedulableRequest) -> Void)?
 
-    func cancelRequest(_: HTTPSchedulableRequest) {
+    init(onCancelRequest: (@Sendable (HTTPSchedulableRequest) -> Void)? = nil) {
+        self.onCancelRequest = onCancelRequest
+    }
+
+    func cancelRequest(_ request: HTTPSchedulableRequest) {
         self.hitCancelCount += 1
+        self.onCancelRequest?(request)
     }
 }
 
 extension RequestOptions {
-    static func forTests(idleReadTimeout: TimeAmount? = nil) -> Self {
+    static func forTests(
+        idleReadTimeout: TimeAmount? = nil,
+        idleWriteTimeout: TimeAmount? = nil,
+        dnsOverride: [String: String] = [:]
+    ) -> Self {
         RequestOptions(
-            idleReadTimeout: idleReadTimeout
+            idleReadTimeout: idleReadTimeout,
+            idleWriteTimeout: idleWriteTimeout,
+            dnsOverride: dnsOverride
         )
     }
 }
